@@ -15,7 +15,23 @@
 #define GSM_TX_PIN PA2                          // Bluepill TX to SIM800L RX
 HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN);  // RX, TX
 
-String phoneNumber = "+94719593248";  // Phone number to send SMS to
+const char* phoneNumber = "+94719593248";  // Phone number to send SMS to
+
+// --- Baud Rates ---
+#define SERIAL_BAUDRATE 9600
+#define GSM_BAUDRATE 115200
+
+// --- Delay Durations (in milliseconds) ---
+#define SERIAL_INIT_WAIT_DELAY 10
+#define GSM_POWER_ON_DELAY 1000
+#define GSM_COMMAND_DELAY 500
+#define SMS_PROMPT_WAIT_DELAY 1000
+#define SMS_SEND_CONFIRM_DELAY 5000
+#define SMS_READ_DELETE_DELAY 1000
+#define DHT_READ_DELAY 2000
+#define DS18B20_READ_DELAY 100
+#define MAIN_LOOP_CYCLE_DELAY 30000
+#define SIM_RESPONSE_TIMEOUT 1000 // Timeout for readSimResponse
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -26,8 +42,8 @@ String simResponseBuffer = "";  // Buffer for incoming SIM800L data
 
 // --- Setup Function: Runs once when the Bluepill starts ---
 void setup() {
-  Serial.begin(9600);
-  while (!Serial) { delay(10); }
+  Serial.begin(SERIAL_BAUDRATE);
+  while (!Serial) { delay(SERIAL_INIT_WAIT_DELAY); }
   Serial.println(F("DHT, DS18B20 Sensor Test with GSM SMS (Send & Receive)"));
 
   // Sensor Initializations (DHT & DS18B20)
@@ -41,30 +57,30 @@ void setup() {
 
   // GSM SIM800L Initialization
   Serial.println(F("Initializing SIM800L GSM Module..."));
-  sim800l.begin(115200);
-  delay(1000);
+  sim800l.begin(GSM_BAUDRATE);
+  delay(GSM_POWER_ON_DELAY);
 
   Serial.println(F("Configuring SIM800L..."));
-  sim800l.println("ATE0");  // Echo off (optional, makes parsing cleaner)
-  delay(500);
+  sim800l.println(F("ATE0"));  // Echo off (optional, makes parsing cleaner)
+  delay(GSM_COMMAND_DELAY);
   readSimResponse();  // Clear buffer
 
-  sim800l.println("AT");  // Handshake
-  delay(500);
+  sim800l.println(F("AT"));  // Handshake
+  delay(GSM_COMMAND_DELAY);
   readSimResponse();
 
-  sim800l.println("AT+CPMS=\"SM\",\"SM\",\"SM\"");  // Use SIM storage for SMS
-  delay(500);
+  sim800l.println(F("AT+CPMS=\"SM\",\"SM\",\"SM\""));  // Use SIM storage for SMS
+  delay(GSM_COMMAND_DELAY);
   readSimResponse();
 
-  sim800l.println("AT+CMGF=1");  // Set SMS to TEXT mode
-  delay(500);
+  sim800l.println(F("AT+CMGF=1"));  // Set SMS to TEXT mode
+  delay(GSM_COMMAND_DELAY);
   readSimResponse();
 
   // Configure New SMS Indication: +CMTI: <mem>,<index>
   // AT+CNMI=2,1,0,0,0 -> Forwards "+CMTI: <mem>,<index>" URC when SMS arrives in storage <mem>
-  sim800l.println("AT+CNMI=2,1,0,0,0");
-  delay(500);
+  sim800l.println(F("AT+CNMI=2,1,0,0,0"));
+  delay(GSM_COMMAND_DELAY);
   readSimResponse();
 
   Serial.println(F("GSM Module Initialized for sending and receiving SMS notifications."));
@@ -80,7 +96,7 @@ void loop() {
 
   // --- DHT Sensor Reading ---
   Serial.println(F("Waiting 2 seconds before DHT reading..."));
-  delay(2000);
+  delay(DHT_READ_DELAY);
 
   Serial.println(F("--- Reading DHT Sensor ---"));
   float h = dht.readHumidity();
@@ -99,7 +115,7 @@ void loop() {
   }
 
   // --- DS18B20 Sensor Reading ---
-  delay(100);
+  delay(DS18B20_READ_DELAY);
   Serial.println(F("--- Reading DS18B20 Sensor ---"));
   Serial.print(F("Requesting DS18B20 temps... "));
   ds18b20Sensors.requestTemperatures();
@@ -126,14 +142,14 @@ void loop() {
 
   Serial.println(F("------------------------------------"));
   Serial.println(F("Waiting 30 seconds before next cycle..."));
-  delay(30000);
+  delay(MAIN_LOOP_CYCLE_DELAY);
 }
 
 // --- Read and print SIM800L response (basic version) ---
 void readSimResponse() {
   unsigned long startTime = millis();
   simResponseBuffer = "";
-  while (millis() - startTime < 1000) {  // Timeout after 1 second
+  while (millis() - startTime < SIM_RESPONSE_TIMEOUT) {  // Timeout after 1 second
     while (sim800l.available()) {
       char c = sim800l.read();
       Serial.write(c);  // Echo to Serial Monitor
@@ -156,7 +172,7 @@ void handleSim800lInput() {
       Serial.print(F("SIM_RECV: "));
       Serial.print(simResponseBuffer);  // Print raw line
       // Check for New SMS Notification: +CMTI: "SM",<index>
-      if (simResponseBuffer.startsWith("+CMTI:")) {
+      if (simResponseBuffer.startsWith(F("+CMTI:"))) {
         Serial.println(F(">>> New SMS Notification Received! <<<"));
         // Parse index: e.g., +CMTI: "SM",15
         int commaIndex = simResponseBuffer.indexOf(',');
@@ -180,9 +196,9 @@ void handleSim800lInput() {
 void readSms(int messageIndex) {
   Serial.print(F("Reading SMS at index: "));
   Serial.println(messageIndex);
-  sim800l.print("AT+CMGR=");
+  sim800l.print(F("AT+CMGR="));
   sim800l.println(messageIndex);
-  delay(1000);        // Wait for the response, which can be multi-line
+  delay(SMS_READ_DELETE_DELAY);        // Wait for the response, which can be multi-line
   readSimResponse();  // This will print the full AT+CMGR response, including message body
 
   // Optionally, delete the message after reading
@@ -193,9 +209,9 @@ void readSms(int messageIndex) {
 void deleteSms(int messageIndex) {
   Serial.print(F("Deleting SMS at index: "));
   Serial.println(messageIndex);
-  sim800l.print("AT+CMGD=");
+  sim800l.print(F("AT+CMGD="));
   sim800l.println(messageIndex);
-  delay(1000);        // Wait for response
+  delay(SMS_READ_DELETE_DELAY);        // Wait for response
   readSimResponse();  // Print SIM800L's response (should be OK or ERROR)
 }
 
@@ -203,23 +219,19 @@ void deleteSms(int messageIndex) {
 void sendSMS(String message) {
   Serial.print(F("Setting phone number: "));
   Serial.println(phoneNumber);
-  sim800l.print("AT+CMGS=\"");
+  sim800l.print(F("AT+CMGS=\""));
   sim800l.print(phoneNumber);
-  sim800l.println("\"");
-  delay(1000);        // Wait for '>' prompt
+  sim800l.println(F("\""));
+  delay(SMS_PROMPT_WAIT_DELAY);        // Wait for '>' prompt
   readSimResponse();  // Should ideally check for '>' here
 
   Serial.print(F("Sending message: "));
   Serial.println(message);
   sim800l.println(message);
-  delay(100);
+  delay(DS18B20_READ_DELAY); // Small delay after sending message before CTRL+Z
 
   sim800l.write(26);  // CTRL+Z
-  delay(5000);        // Wait for SMS send confirmation (e.g., +CMGS: XX)
+  delay(SMS_SEND_CONFIRM_DELAY);        // Wait for SMS send confirmation (e.g., +CMGS: XX)
   readSimResponse();
   Serial.println(F("SMS send attempt finished."));
 }
-
-// --- (Original updateSerial() removed as its functionality is partially
-//      integrated into readSimResponse and handleSim800lInput for clarity,
-//      and direct Serial->SIM forwarding is not essential for this automated flow) ---

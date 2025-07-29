@@ -1,0 +1,116 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  create_release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: release-${{ github.sha }}
+          name: Release ${{ github.sha }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  build:
+    runs-on: ubuntu-latest
+    needs: create_release
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Cache Arduino CLI
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino
+          key: ${{ runner.os }}-arduino-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-arduino-
+
+      - name: Install Arduino CLI
+        run: |
+          mkdir -p "$HOME/arduino-cli"
+          cd "$HOME/arduino-cli"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=. sh
+          echo "$HOME/arduino-cli" >> $GITHUB_PATH
+          ./arduino-cli version
+
+      - name: Install STM32 core and required libraries
+        run: |
+          # Initialize arduino-cli config with STM32 URL
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/stm32duino/BoardManagerFiles/main/package_stmicroelectronics_index.json
+          
+          # Update indexes and install STM32 core
+          arduino-cli core update-index --verbose
+          arduino-cli core search stm32 --verbose
+          arduino-cli core install "STMicroelectronics:stm32" --verbose
+          
+          # Install required libraries
+          arduino-cli lib install "DHT sensor library@1.4.6" --verbose
+          arduino-cli lib install "Adafruit Unified Sensor" --verbose
+          arduino-cli lib install "OneWire" --verbose
+          arduino-cli lib install "DallasTemperature" --verbose
+          
+          # Verify library installations
+          arduino-cli lib list
+          
+          # List installed components for verification
+          echo "=== Installed Cores ==="
+          arduino-cli core list
+          echo "=== Available Boards ==="
+          arduino-cli board listall "STMicroelectronics:stm32"
+          echo "=== Installed Libraries ==="
+          arduino-cli lib list
+
+      - name: Compile Firmware
+        run: |
+          cd Firmware/sms-stm32
+          # Compile for Blue Pill (STM32F103C8)
+          arduino-cli compile \
+            --fqbn "STMicroelectronics:stm32:GenF1:pnum=BLUEPILL_F103C8,upload_method=swdMethod,xserial=generic,usb=none,xusb=FS,opt=osstd,rtlib=nano" \
+            --output-dir . \
+            --verbose \
+            sms-stm32.ino
+          
+          # Create release directory and copy binary
+          mkdir -p ../../release-files
+          cp sms-stm32.ino.bin ../../release-files/sms-stm32-bluepill.bin
+
+      - name: Upload Release Assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: release-${{ github.sha }}
+          files: |
+            release-files/sms-stm32-bluepill.bin
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: release-files/sms-stm32-bluepill.bin
+          if-no-files-found: error
+          retention-days: 90

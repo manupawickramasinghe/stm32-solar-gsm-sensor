@@ -54,11 +54,24 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 String phoneNumbers[] = {"+94719593248", "+94719751003", "+94768378406"};
 const int NUM_PHONE_NUMBERS = 3;
 
-// Variables for sensor averaging
+// State machine states
+enum SystemState {
+    STATE_INIT,
+    STATE_WAIT_DHT,
+    STATE_READ_DHT,
+    STATE_WAIT_DS18B20,
+    STATE_READ_DS18B20,
+    STATE_PROCESS_DATA,
+    STATE_IDLE
+};
+
+// Variables for sensor averaging and timing
 float dhtHumSum = 0, dhtTempSum = 0, ds18b20TempSum = 0;
 int readingCount = 0;
 unsigned long lastSendTime = 0;
-// const unsigned long SEND_INTERVAL = 3600000; // This will be replaced by EEPROM counter logic
+unsigned long lastStateChange = 0;    // Tracks the last state change time
+unsigned long lastMainLoopTime = 0;   // Tracks the last main cycle completion
+SystemState currentState = STATE_IDLE;
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -197,107 +210,113 @@ void setup() {
 
 // --- Loop Function: Runs repeatedly ---
 void loop() {
-  // --- ADC Reading Check (Removed as per request) ---
-  // int adcValue = analogRead(ADC_INPUT_PIN);
-  // Serial.print(F("Current ADC reading on PA0: "));
-  // Serial.println(adcValue);
+    // Always check for incoming SMS messages
+    handleSim800lInput();
 
-  // if (adcValue >= 975) { // Removed ADC condition
+    // Try to initialize GSM if not ready
     if (!gsmIsInitializedAndReady) {
-      Serial.println(F("Attempting to initialize GSM module..."));
-      gsmIsInitializedAndReady = initializeAndConfigureGsmModule();
-      if (!gsmIsInitializedAndReady) {
-        Serial.println(F("GSM Module initialization failed. Will retry after delay."));
-        delay(GSM_INIT_FAILURE_RETRY_DELAY); // Wait before retrying
-        return; // Exit loop early if GSM init failed
-      }
-    }
-
-    // Proceed only if GSM is initialized and ready
-    if (gsmIsInitializedAndReady) {
-      Serial.println(F("GSM Ready. Proceeding with sensor readings."));
-      handleSim800lInput();  // Check for incoming SMS or other data
-
-      // --- DHT Sensor Reading ---
-      Serial.println(F("Waiting 2 seconds before DHT reading..."));
-      delay(DHT_READ_PRE_DELAY); 
-
-      Serial.println(F("--- Reading DHT Sensor ---"));
-      float h = dht.readHumidity();
-      float t = dht.readTemperature(); 
-
-      if (!isnan(h) && !isnan(t)) {
-        Serial.print(F("DHT - H:")); Serial.print(h); Serial.print(F("% T:")); Serial.print(t); Serial.println(F("C"));
-        dhtHumSum += h;
-        dhtTempSum += t;
-      }
-
-      // --- DS18B20 Sensor Reading ---
-      delay(DS18B20_READ_PRE_DELAY); 
-      Serial.println(F("--- Reading DS18B20 Sensor ---"));
-      Serial.print(F("Requesting DS18B20 temps... "));
-      ds18b20Sensors.requestTemperatures();
-      Serial.println(F("Done."));
-      float tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0); 
-
-      if (tempC_ds18b20 != DEVICE_DISCONNECTED_C && tempC_ds18b20 != 85.0) { 
-        Serial.print(F("DS18B20 - T:")); Serial.print(tempC_ds18b20); Serial.println(F("C"));
-        ds18b20TempSum += tempC_ds18b20;
-      }
-
-      readingCount++;
-      smsCounter++; // Increment SMS counter
-      EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter); // Store updated counter
-      EEPROM.commit(); // Commit changes to EEPROM
-      Serial.print(F("SMS Counter: ")); Serial.println(smsCounter);
-
-      // Check if it's time to send the averaged data (every 60 minutes or counter >= 12)
-      if (smsCounter >= SMS_SEND_THRESHOLD) {
-        String sensorDataSms = "";
-        
-        // Calculate averages
-        if (readingCount > 0) {
-          float avgHum = dhtHumSum / readingCount;
-          float avgDhtTemp = dhtTempSum / readingCount;
-          float avgDs18b20Temp = ds18b20TempSum / readingCount;
-          
-          sensorDataSms = "60min Avg - DHT H:" + String(avgHum, 1) + "% T:" + String(avgDhtTemp, 1) + "C; ";
-          sensorDataSms += "DS18B20 T:" + String(avgDs18b20Temp, 1) + "C";
-          
-          // Send SMS to all numbers
-          Serial.println(F("--- Sending SMS with Average Sensor Data ---"));
-          for (int i = 0; i < NUM_PHONE_NUMBERS; i++) {
-            sendSMS(sensorDataSms, phoneNumbers[i]);
-          }
-          
-          // Reset averages and counter
-          dhtHumSum = 0;
-          dhtTempSum = 0;
-          ds18b20TempSum = 0;
-          readingCount = 0;
-          smsCounter = 0; // Reset SMS counter
-          EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter); // Store reset counter
-          EEPROM.commit(); // Commit changes to EEPROM
-          lastSendTime = millis(); // Reset last send time
+        static unsigned long lastGsmInitAttempt = 0;
+        if (millis() - lastGsmInitAttempt >= GSM_INIT_FAILURE_RETRY_DELAY) {
+            Serial.println(F("Attempting to initialize GSM module..."));
+            gsmIsInitializedAndReady = initializeAndConfigureGsmModule();
+            lastGsmInitAttempt = millis();
+            if (!gsmIsInitializedAndReady) {
+                Serial.println(F("GSM Module initialization failed. Will retry after delay."));
+                return;
+            }
         }
-      }
-
-      Serial.println(F("------------------------------------"));
-      Serial.println(F("Reading cycle complete. Waiting 5 minutes..."));
-      delay(MAIN_LOOP_CYCLE_DELAY); // 5 minute delay between readings
-    } else {
-      // If GSM is not initialized, wait and retry
-      Serial.println(F("GSM not ready. Waiting before next attempt."));
-      delay(GSM_INIT_FAILURE_RETRY_DELAY);
+        return;
     }
-  // } else { // Removed ADC condition
-  //   Serial.println(F("ADC value below 975. System idle. GSM operations paused."));
-  //   if (gsmIsInitializedAndReady) {
-  //       Serial.println(F("GSM module was active, now pausing operations. Will re-initialize if ADC condition met again."));
-  //   }
-  //   gsmIsInitializedAndReady = false; // Reset flag so GSM re-initializes if ADC goes high again
-  //   delay(ADC_IDLE_CHECK_DELAY); // Wait for 5 seconds before checking ADC again
-  // }
+
+    // Main state machine for sensor readings and data processing
+    unsigned long currentMillis = millis();
+
+    switch (currentState) {
+        case STATE_IDLE:
+            if (currentMillis - lastMainLoopTime >= MAIN_LOOP_CYCLE_DELAY) {
+                currentState = STATE_WAIT_DHT;
+                lastStateChange = currentMillis;
+                Serial.println(F("Starting new reading cycle..."));
+            }
+            break;
+
+        case STATE_WAIT_DHT:
+            if (currentMillis - lastStateChange >= DHT_READ_PRE_DELAY) {
+                currentState = STATE_READ_DHT;
+                Serial.println(F("--- Reading DHT Sensor ---"));
+            }
+            break;
+
+        case STATE_READ_DHT:
+            float h = dht.readHumidity();
+            float t = dht.readTemperature();
+            if (!isnan(h) && !isnan(t)) {
+                Serial.print(F("DHT - H:")); Serial.print(h); 
+                Serial.print(F("% T:")); Serial.print(t); Serial.println(F("C"));
+                dhtHumSum += h;
+                dhtTempSum += t;
+            }
+            currentState = STATE_WAIT_DS18B20;
+            lastStateChange = currentMillis;
+            break;
+
+        case STATE_WAIT_DS18B20:
+            if (currentMillis - lastStateChange >= DS18B20_READ_PRE_DELAY) {
+                currentState = STATE_READ_DS18B20;
+                Serial.println(F("--- Reading DS18B20 Sensor ---"));
+            }
+            break;
+
+        case STATE_READ_DS18B20:
+            ds18b20Sensors.requestTemperatures();
+            float tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0);
+            if (tempC_ds18b20 != DEVICE_DISCONNECTED_C && tempC_ds18b20 != 85.0) {
+                Serial.print(F("DS18B20 - T:")); 
+                Serial.print(tempC_ds18b20); Serial.println(F("C"));
+                ds18b20TempSum += tempC_ds18b20;
+            }
+            currentState = STATE_PROCESS_DATA;
+            break;
+
+        case STATE_PROCESS_DATA:
+            readingCount++;
+            smsCounter++;
+            EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter);
+            EEPROM.commit();
+            Serial.print(F("SMS Counter: ")); Serial.println(smsCounter);
+
+            if (smsCounter >= SMS_SEND_THRESHOLD && readingCount > 0) {
+                float avgHum = dhtHumSum / readingCount;
+                float avgDhtTemp = dhtTempSum / readingCount;
+                float avgDs18b20Temp = ds18b20TempSum / readingCount;
+                
+                String sensorDataSms = "60min Avg - DHT H:" + String(avgHum, 1) + 
+                                     "% T:" + String(avgDhtTemp, 1) + "C; " +
+                                     "DS18B20 T:" + String(avgDs18b20Temp, 1) + "C";
+                
+                Serial.println(F("--- Sending SMS with Average Sensor Data ---"));
+                for (int i = 0; i < NUM_PHONE_NUMBERS; i++) {
+                    sendSMS(sensorDataSms, phoneNumbers[i]);
+                }
+                
+                // Reset averages and counter
+                dhtHumSum = 0;
+                dhtTempSum = 0;
+                ds18b20TempSum = 0;
+                readingCount = 0;
+                smsCounter = 0;
+                EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter);
+                EEPROM.commit();
+                lastSendTime = currentMillis;
+            }
+
+            Serial.println(F("------------------------------------"));
+            Serial.println(F("Reading cycle complete. Waiting for next cycle..."));
+            lastMainLoopTime = currentMillis;
+            currentState = STATE_IDLE;
+            break;
+    }
+}
 }
 
 // --- Read and print SIM800L response ---

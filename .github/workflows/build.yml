@@ -95,12 +95,13 @@ jobs:
           # Compile for Blue Pill (STM32F103C8)
           arduino-cli compile \
             --fqbn "STMicroelectronics:stm32:GenF1:pnum=BLUEPILL_F103C8,upload_method=swdMethod,xserial=generic,usb=none,xusb=FS,opt=osstd,rtlib=nano" \
+            --output-dir . \
             --verbose \
             sms-stm32.ino
           
           # Create release directory and copy binary
           mkdir -p ../../release-files
-          find . -name "*.bin" -type f -exec cp {} ../../release-files/sms-stm32-bluepill.bin \;
+          cp sms-stm32.ino.bin ../../release-files/sms-stm32-bluepill.bin
 
       - name: Upload Release Assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

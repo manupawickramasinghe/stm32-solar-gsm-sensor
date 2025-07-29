@@ -73,22 +73,19 @@ jobs:
           arduino-cli core install "STMicroelectronics:stm32" --verbose
           
           # Install required libraries
-          arduino-cli lib install "DHT sensor library@1.4.4" --verbose
-          arduino-cli lib install "OneWire@2.3.7" --verbose
-          arduino-cli lib install "DallasTemperature@3.9.1" --verbose
+          arduino-cli lib install "DHT sensor library" --verbose
+          arduino-cli lib install "OneWire" --verbose
+          arduino-cli lib install "Arduino-Temperature-Control-Library" --verbose
           
-          # List installed components for verification
-          echo "Installed Cores:"
-          arduino-cli core list
-          echo "Installed Libraries:"
+          # Verify library installations
           arduino-cli lib list
-          echo "Available boards:"
-          arduino-cli board listall "STMicroelectronics:stm32"
           
           # List installed components for verification
-          echo "Installed Cores:"
+          echo "=== Installed Cores ==="
           arduino-cli core list
-          echo "Installed Libraries:"
+          echo "=== Available Boards ==="
+          arduino-cli board listall "STMicroelectronics:stm32"
+          echo "=== Installed Libraries ==="
           arduino-cli lib list
 
       - name: Compile Firmware

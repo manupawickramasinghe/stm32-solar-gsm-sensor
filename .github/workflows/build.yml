@@ -65,7 +65,11 @@ jobs:
         run: |
           arduino-cli config init --verbose
           arduino-cli core update-index --verbose
-          arduino-cli core install STMicroelectronics:stm32 --verbose
+          # Add STM32 package URL to Arduino CLI config
+          arduino-cli config add board_manager.additional_urls https://github.com/stm32duino/BoardManagerFiles/raw/main/package_stmicroelectronics_index.json
+          arduino-cli core update-index --verbose
+          arduino-cli core install STM32:stm32 --verbose
+          arduino-cli core list
           arduino-cli lib install "DHT sensor library" --verbose
           arduino-cli lib install "OneWire" --verbose
           arduino-cli lib install "DallasTemperature" --verbose
@@ -79,9 +83,12 @@ jobs:
       - name: Compile Firmware
         run: |
           cd Firmware/sms-stm32
-          arduino-cli compile --fqbn STMicroelectronics:stm32:GenF1:pnum=BLUEPILL_F103C8 --verbose sms-stm32.ino
+          # Show available boards for verification
+          arduino-cli board listall
+          # Compile for Blue Pill
+          arduino-cli compile --fqbn STM32:stm32:GenF1:pnum=BLUEPILL_F103C8 --verbose sms-stm32.ino
           mkdir -p ../../release-files
-          cp build/STMicroelectronics.stm32.GenF1/sms-stm32.ino.bin ../../release-files/sms-stm32-bluepill.bin
+          cp build/STM32.stm32.GenF1/sms-stm32.ino.bin ../../release-files/sms-stm32-bluepill.bin
 
       - name: Upload Release Assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

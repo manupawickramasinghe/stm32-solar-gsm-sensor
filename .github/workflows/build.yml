@@ -73,9 +73,9 @@ jobs:
           arduino-cli core install "STMicroelectronics:stm32" --verbose
           
           # Install required libraries
-          arduino-cli lib install "DHT sensor library" --verbose
+          arduino-cli lib install "Adafruit DHT sensor library" --verbose
           arduino-cli lib install "OneWire" --verbose
-          arduino-cli lib install "Arduino-Temperature-Control-Library" --verbose
+          arduino-cli lib install "DallasTemperature" --verbose
           
           # Verify library installations
           arduino-cli lib list

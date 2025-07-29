@@ -63,16 +63,27 @@ jobs:
 
       - name: Install STM32 core and required libraries
         run: |
-          arduino-cli config init --verbose
+          # Initialize arduino-cli config with STM32 URL
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/stm32duino/BoardManagerFiles/main/package_stmicroelectronics_index.json
+          
+          # Update indexes and install STM32 core
           arduino-cli core update-index --verbose
-          # Add STM32 package URL to Arduino CLI config
-          arduino-cli config add board_manager.additional_urls https://github.com/stm32duino/BoardManagerFiles/raw/main/package_stmicroelectronics_index.json
-          arduino-cli core update-index --verbose
-          arduino-cli core install STM32:stm32 --verbose
+          arduino-cli core search stm32 --verbose
+          arduino-cli core install "STMicroelectronics:stm32" --verbose
+          
+          # Install required libraries
+          arduino-cli lib install "DHT sensor library@1.4.4" --verbose
+          arduino-cli lib install "OneWire@2.3.7" --verbose
+          arduino-cli lib install "DallasTemperature@3.9.1" --verbose
+          
+          # List installed components for verification
+          echo "Installed Cores:"
           arduino-cli core list
-          arduino-cli lib install "DHT sensor library" --verbose
-          arduino-cli lib install "OneWire" --verbose
-          arduino-cli lib install "DallasTemperature" --verbose
+          echo "Installed Libraries:"
+          arduino-cli lib list
+          echo "Available boards:"
+          arduino-cli board listall "STMicroelectronics:stm32"
           
           # List installed components for verification
           echo "Installed Cores:"
@@ -83,12 +94,15 @@ jobs:
       - name: Compile Firmware
         run: |
           cd Firmware/sms-stm32
-          # Show available boards for verification
-          arduino-cli board listall
-          # Compile for Blue Pill
-          arduino-cli compile --fqbn STM32:stm32:GenF1:pnum=BLUEPILL_F103C8 --verbose sms-stm32.ino
+          # Compile for Blue Pill (STM32F103C8)
+          arduino-cli compile \
+            --fqbn "STMicroelectronics:stm32:GenF1:pnum=BLUEPILL_F103C8,upload_method=swdMethod,xserial=generic,usb=none,xusb=FS,opt=osstd,rtlib=nano" \
+            --verbose \
+            sms-stm32.ino
+          
+          # Create release directory and copy binary
           mkdir -p ../../release-files
-          cp build/STM32.stm32.GenF1/sms-stm32.ino.bin ../../release-files/sms-stm32-bluepill.bin
+          find . -name "*.bin" -type f -exec cp {} ../../release-files/sms-stm32-bluepill.bin \;
 
       - name: Upload Release Assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -55,17 +55,26 @@ jobs:
 
       - name: Install Arduino CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          echo "$HOME/bin" >> $GITHUB_PATH
+          mkdir -p "$HOME/arduino-cli"
+          cd "$HOME/arduino-cli"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=. sh
+          echo "$HOME/arduino-cli" >> $GITHUB_PATH
+          ./arduino-cli version
 
       - name: Install STM32 core and required libraries
         run: |
-          arduino-cli config init
-          arduino-cli core update-index
-          arduino-cli core install STMicroelectronics:stm32
-          arduino-cli lib install "DHT sensor library"
-          arduino-cli lib install "OneWire"
-          arduino-cli lib install "DallasTemperature"
+          arduino-cli config init --verbose
+          arduino-cli core update-index --verbose
+          arduino-cli core install STMicroelectronics:stm32 --verbose
+          arduino-cli lib install "DHT sensor library" --verbose
+          arduino-cli lib install "OneWire" --verbose
+          arduino-cli lib install "DallasTemperature" --verbose
+          
+          # List installed components for verification
+          echo "Installed Cores:"
+          arduino-cli core list
+          echo "Installed Libraries:"
+          arduino-cli lib list
 
       - name: Compile Firmware
         run: |

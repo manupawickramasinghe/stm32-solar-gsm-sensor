@@ -58,7 +58,7 @@ jobs:
       - name: Install STM32 core and required libraries
         run: |
           # Initialize arduino-cli config with STM32 URL
-          arduino-cli config init
+          arduino-cli config init --overwrite
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/stm32duino/BoardManagerFiles/main/package_stmicroelectronics_index.json
           
           # Update indexes and install STM32 core

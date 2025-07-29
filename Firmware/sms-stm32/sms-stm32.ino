@@ -82,6 +82,13 @@ String simResponseBuffer = "";  // Buffer for incoming SIM800L data
 bool gsmIsInitializedAndReady = false; // Flag to track GSM module initialization status
 int smsCounter = 0; // Counter for SMS sending
 
+// Forward declarations for functions
+void readSimResponse();
+void handleSim800lInput();
+void readSms(int messageIndex);
+void deleteSms(int messageIndex);
+void sendSMS(String message, String recipientNumber);
+
 // --- Function to get Timestamp from GSM Module ---
 String getGsmTimestamp() {
   if (!gsmIsInitializedAndReady) {
@@ -182,7 +189,6 @@ void setup() {
   // Serial.println(F("System will wait for ADC condition on PA0 >= 975 to initialize GSM and operate.")); // Removed ADC condition message
 
   // Initialize EEPROM and read counter
-  EEPROM.begin(); // Initialize EEPROM
   smsCounter = EEPROM.read(EEPROM_COUNTER_ADDR);
   Serial.print(F("EEPROM SMS Counter initialized to: "));
   Serial.println(smsCounter);
@@ -230,6 +236,7 @@ void loop() {
 
     // Main state machine for sensor readings and data processing
     unsigned long currentMillis = millis();
+    float h, t, tempC_ds18b20;  // Declare variables outside of switch
 
     switch (currentState) {
         case STATE_IDLE:
@@ -248,8 +255,8 @@ void loop() {
             break;
 
         case STATE_READ_DHT:
-            float h = dht.readHumidity();
-            float t = dht.readTemperature();
+            h = dht.readHumidity();
+            t = dht.readTemperature();
             if (!isnan(h) && !isnan(t)) {
                 Serial.print(F("DHT - H:")); Serial.print(h); 
                 Serial.print(F("% T:")); Serial.print(t); Serial.println(F("C"));
@@ -269,7 +276,7 @@ void loop() {
 
         case STATE_READ_DS18B20:
             ds18b20Sensors.requestTemperatures();
-            float tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0);
+            tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0);
             if (tempC_ds18b20 != DEVICE_DISCONNECTED_C && tempC_ds18b20 != 85.0) {
                 Serial.print(F("DS18B20 - T:")); 
                 Serial.print(tempC_ds18b20); Serial.println(F("C"));
@@ -282,7 +289,6 @@ void loop() {
             readingCount++;
             smsCounter++;
             EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter);
-            EEPROM.commit();
             Serial.print(F("SMS Counter: ")); Serial.println(smsCounter);
 
             if (smsCounter >= SMS_SEND_THRESHOLD && readingCount > 0) {
@@ -306,7 +312,6 @@ void loop() {
                 readingCount = 0;
                 smsCounter = 0;
                 EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter);
-                EEPROM.commit();
                 lastSendTime = currentMillis;
             }
 
@@ -317,7 +322,7 @@ void loop() {
             break;
     }
 }
-}
+
 
 // --- Read and print SIM800L response ---
 void readSimResponse() {

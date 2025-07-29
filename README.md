@@ -1,5 +1,5 @@
 # stm32-solar-gsm-sensor
-Firmware and hardware guide for an open-source, solar-powered agricultural sensor based on the STM32 "Blue Pill" and a SIM800L GSM module.
+Firmware and hardware guide for an open-source, solar-powered agricultural sensor system based on the STM32 "Blue Pill" and a SIM800L GSM module.
 
 This project is designed for remote environmental monitoring. It periodically reads data from temperature and humidity sensors, aggregates the data, and sends a summary report via SMS to a predefined list of phone numbers. It is optimized for low-power operation, making it suitable for solar or battery-powered deployments.
 
@@ -16,7 +16,7 @@ This project is designed for remote environmental monitoring. It periodically re
 
 - **Network Timestamp**: Fetches the current date and time from the cellular network and includes it in every SMS report for accurate logging.
 
-- **Persistent Counter**: Uses the STM32's built-in EEPROM to save its reading counter, ensuring it can resume its cycle even after a power loss or reset.
+- **Persistent Counter**: Uses Flash memory emulation (since the STM32F103C8T6 does not have built-in EEPROM) to save its reading counter, ensuring it can resume its cycle even after a power loss or reset.
 
 - **Remote Control (Basic)**: Capable of receiving and processing incoming SMS messages.
 

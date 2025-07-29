@@ -1,21 +1,35 @@
 #include "DHT.h"  // Main DHT sensor library
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <SoftwareSerial.h>  // For GSM module communication
+// #include <SoftwareSerial.h> // Not needed if using HardwareSerial correctly
+// For STM32, ensure you are using the correct HardwareSerial include if necessary,
+// or that your core handles HardwareSerial instantiation as you've done.
 
 // --- Configuration for DHT Sensor ---
-#define DHTPIN PB1     // Digital pin connected to the DHT sensor (User specified)
-#define DHTTYPE DHT11  // DHT 11 (User specified)
+#define DHTPIN PB1     // Digital pin connected to the DHT sensor
+#define DHTTYPE DHT11  // DHT 11
 
 // --- Configuration for DS18B20 Sensor ---
-#define ONE_WIRE_BUS PB0  // Data wire for DS18B20 (User specified)
+#define ONE_WIRE_BUS PB0  // Data wire for DS18B20
+
+// --- Configuration for ADC Input ---
+#define ADC_INPUT_PIN PA0 // Analog input pin for the trigger condition
 
 // --- Configuration for GSM SIM800L Module ---
-#define GSM_RX_PIN PA3                          // Bluepill RX from SIM800L TX
-#define GSM_TX_PIN PA2                          // Bluepill TX to SIM800L RX
-HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN);  // RX, TX
+#define GSM_RX_PIN PA3                          // Bluepill RX from SIM800L TX (USART2_RX)
+#define GSM_TX_PIN PA2                          // Bluepill TX to SIM800L RX (USART2_TX)
+HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor works for your STM32 core for USART2
+                                                // Standard way might be: HardwareSerial Serial2(PA3, PA2); and use Serial2
 
-String phoneNumber = "+94719593248";  // Phone number to send SMS to
+// Array of phone numbers to send SMS to
+String phoneNumbers[] = {"+94719593248", "+94719751003", "+94768378406"};
+const int NUM_PHONE_NUMBERS = 3;
+
+// Variables for sensor averaging
+float dhtHumSum = 0, dhtTempSum = 0, ds18b20TempSum = 0;
+int readingCount = 0;
+unsigned long lastSendTime = 0;
+const unsigned long SEND_INTERVAL = 3000; // 60 minutes in milliseconds
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -23,12 +37,110 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature ds18b20Sensors(&oneWire);
 
 String simResponseBuffer = "";  // Buffer for incoming SIM800L data
+bool gsmIsInitializedAndReady = false; // Flag to track GSM module initialization status
+
+// --- Function to get Timestamp from GSM Module ---
+String getGsmTimestamp() {
+  if (!gsmIsInitializedAndReady) {
+    Serial.println(F("GSM not ready, cannot get timestamp."));
+    return "TS_ERR";
+  }
+  Serial.println(F("Attempting to get GSM timestamp..."));
+  sim800l.println("AT+CCLK?"); // Command to query clock
+  delay(200); 
+  readSimResponse(); 
+
+  int cclkIndex = simResponseBuffer.indexOf("+CCLK: \"");
+  if (cclkIndex != -1) {
+    int startIndex = cclkIndex + 8; 
+    int endIndex = simResponseBuffer.indexOf("\"", startIndex);
+    if (endIndex != -1) {
+      String dateTimeGsm = simResponseBuffer.substring(startIndex, endIndex);
+      if (dateTimeGsm.length() >= 17) { 
+        String year = "20" + dateTimeGsm.substring(0, 2);
+        String month = dateTimeGsm.substring(3, 5);
+        String day = dateTimeGsm.substring(6, 8);
+        String hour = dateTimeGsm.substring(9,11);
+        String minute = dateTimeGsm.substring(12,14);
+        String second = dateTimeGsm.substring(15,17);
+        return year + "-" + month + "-" + day + " " + hour + ":" + minute + ":" + second;
+      }
+    }
+  }
+  Serial.println(F("Error parsing CCLK response or CCLK not found in buffer."));
+  return "TS_ERR"; 
+}
+
+// --- Function to Initialize and Configure GSM Module ---
+bool initializeAndConfigureGsmModule() {
+  Serial.println(F("Attempting to initialize SIM800L GSM Module..."));
+  sim800l.begin(115200); // Baud rate for SIM800L communication
+  delay(2000); // Give module time to boot up after serial begin
+
+  Serial.println(F("Configuring SIM800L..."));
+  
+  sim800l.println("ATE0");  // Echo off
+  delay(500);
+  readSimResponse(); 
+  // No critical check for ATE0 response, usually works or is optional.
+
+  sim800l.println("AT");  // Handshake
+  delay(500);
+  readSimResponse();
+  if (simResponseBuffer.indexOf("OK") == -1) {
+    Serial.println(F("GSM Init Error: AT command failed."));
+    return false;
+  }
+
+  sim800l.println("AT+CPMS=\"SM\",\"SM\",\"SM\"");  // Use SIM storage for SMS
+  delay(500);
+  readSimResponse();
+  if (simResponseBuffer.indexOf("OK") == -1) {
+    Serial.println(F("GSM Init Warning: AT+CPMS command failed or no OK."));
+    // This might not be critical for sending, but good for consistency
+  }
+
+  sim800l.println("AT+CMGF=1");  // Set SMS to TEXT mode
+  delay(500);
+  readSimResponse();
+  if (simResponseBuffer.indexOf("OK") == -1) {
+    Serial.println(F("GSM Init Error: AT+CMGF=1 command failed."));
+    return false;
+  }
+
+  sim800l.println("AT+CNMI=2,1,0,0,0"); // Configure New SMS Indication
+  delay(500);
+  readSimResponse();
+  if (simResponseBuffer.indexOf("OK") == -1) {
+    Serial.println(F("GSM Init Warning: AT+CNMI command failed or no OK."));
+    // This is important for receiving SMS notifications, but sending might still work
+  }
+  
+  // Check network registration (optional but good for ensuring timestamp/SMS success)
+  sim800l.println("AT+CREG?");
+  delay(1000); // Give time for CREG response
+  readSimResponse();
+  // Expected: +CREG: 0,1 (home network) or +CREG: 0,5 (roaming)
+  if (simResponseBuffer.indexOf("+CREG: 0,1") == -1 && simResponseBuffer.indexOf("+CREG: 0,5") == -1) {
+      Serial.println(F("GSM Warning: Not registered on network yet. Timestamp and SMS might fail."));
+      // Consider if this should return false. For now, allow proceeding.
+  }
+
+  Serial.println(F("GSM Module Initialized and Configured successfully."));
+  return true;
+}
+
 
 // --- Setup Function: Runs once when the Bluepill starts ---
 void setup() {
-  Serial.begin(9600);
-  while (!Serial) { delay(10); }
-  Serial.println(F("DHT, DS18B20 Sensor Test with GSM SMS (Send & Receive)"));
+  Serial.begin(9600); // For debugging output to PC
+  while (!Serial) { delay(10); } // Wait for serial port to connect (needed for some boards)
+  Serial.println(F("DHT, DS18B20 Sensor Test with GSM SMS (Send & Receive with Timestamp & ADC Trigger)"));
+  Serial.println(F("System will wait for ADC condition on PA0 >= 975 to initialize GSM and operate."));
+
+  // ADC Pin Initialization
+  pinMode(ADC_INPUT_PIN, INPUT_ANALOG);
+  Serial.print(F("ADC Input Pin PA0 configured.\n"));
 
   // Sensor Initializations (DHT & DS18B20)
   Serial.print(F("Initializing DHT Sensor (Type: DHT11, Pin: PB1)\n"));
@@ -38,188 +150,209 @@ void setup() {
   Serial.print(F("Initializing DS18B20 Sensor (Pin: PB0)\n"));
   ds18b20Sensors.begin();
   Serial.println(F("DS18B20 sensor ds18b20Sensors.begin() called."));
-
-  // GSM SIM800L Initialization
-  Serial.println(F("Initializing SIM800L GSM Module..."));
-  sim800l.begin(115200);
-  delay(1000);
-
-  Serial.println(F("Configuring SIM800L..."));
-  sim800l.println("ATE0");  // Echo off (optional, makes parsing cleaner)
-  delay(500);
-  readSimResponse();  // Clear buffer
-
-  sim800l.println("AT");  // Handshake
-  delay(500);
-  readSimResponse();
-
-  sim800l.println("AT+CPMS=\"SM\",\"SM\",\"SM\"");  // Use SIM storage for SMS
-  delay(500);
-  readSimResponse();
-
-  sim800l.println("AT+CMGF=1");  // Set SMS to TEXT mode
-  delay(500);
-  readSimResponse();
-
-  // Configure New SMS Indication: +CMTI: <mem>,<index>
-  // AT+CNMI=2,1,0,0,0 -> Forwards "+CMTI: <mem>,<index>" URC when SMS arrives in storage <mem>
-  sim800l.println("AT+CNMI=2,1,0,0,0");
-  delay(500);
-  readSimResponse();
-
-  Serial.println(F("GSM Module Initialized for sending and receiving SMS notifications."));
+  
+  // GSM Module will be initialized in loop() based on ADC condition
   Serial.println(F("------------------------------------"));
-  // Reminders...
 }
 
 // --- Loop Function: Runs repeatedly ---
 void loop() {
-  handleSim800lInput();  // Check for incoming SMS or other data
+  // --- ADC Reading Check ---
+  int adcValue = analogRead(ADC_INPUT_PIN);
+  Serial.print(F("Current ADC reading on PA0: "));
+  Serial.println(adcValue);
 
-  String sensorDataSms = "";
+  if (adcValue >= 975) {
+    if (!gsmIsInitializedAndReady) {
+      Serial.println(F("ADC condition met. Attempting to initialize GSM module..."));
+      gsmIsInitializedAndReady = initializeAndConfigureGsmModule();
+      if (!gsmIsInitializedAndReady) {
+        Serial.println(F("GSM Module initialization failed. Will retry on next valid ADC reading."));
+        delay(5000); // Wait before retrying or next ADC check
+        return; // Exit loop early if GSM init failed
+      }
+    }
 
-  // --- DHT Sensor Reading ---
-  Serial.println(F("Waiting 2 seconds before DHT reading..."));
-  delay(2000);
+    // Proceed only if GSM is initialized and ready
+    if (gsmIsInitializedAndReady) {
+      Serial.println(F("GSM Ready. Proceeding with sensor readings."));
+      handleSim800lInput();  // Check for incoming SMS or other data
 
-  Serial.println(F("--- Reading DHT Sensor ---"));
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
+      // --- DHT Sensor Reading ---
+      Serial.println(F("Waiting 2 seconds before DHT reading..."));
+      delay(2000); 
 
-  if (isnan(h) || isnan(t)) {
-    Serial.println(F(">>> ERROR: Failed to read from DHT sensor! <<<"));
-    sensorDataSms += "DHT Err; ";
+      Serial.println(F("--- Reading DHT Sensor ---"));
+      float h = dht.readHumidity();
+      float t = dht.readTemperature(); 
+
+      if (!isnan(h) && !isnan(t)) {
+        Serial.print(F("DHT - H:")); Serial.print(h); Serial.print(F("% T:")); Serial.print(t); Serial.println(F("C"));
+        dhtHumSum += h;
+        dhtTempSum += t;
+      }
+
+      // --- DS18B20 Sensor Reading ---
+      delay(100); 
+      Serial.println(F("--- Reading DS18B20 Sensor ---"));
+      Serial.print(F("Requesting DS18B20 temps... "));
+      ds18b20Sensors.requestTemperatures();
+      Serial.println(F("Done."));
+      float tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0); 
+
+      if (tempC_ds18b20 != DEVICE_DISCONNECTED_C && tempC_ds18b20 != 85.0) { 
+        Serial.print(F("DS18B20 - T:")); Serial.print(tempC_ds18b20); Serial.println(F("C"));
+        ds18b20TempSum += tempC_ds18b20;
+      }
+
+      readingCount++;
+
+      // Check if it's time to send the averaged data (every 60 minutes)
+      if (millis() - lastSendTime >= SEND_INTERVAL) {
+        String sensorDataSms = "";
+        
+        // Calculate averages
+        if (readingCount > 0) {
+          float avgHum = dhtHumSum / readingCount;
+          float avgDhtTemp = dhtTempSum / readingCount;
+          float avgDs18b20Temp = ds18b20TempSum / readingCount;
+          
+          sensorDataSms = "60min Avg - DHT H:" + String(avgHum, 1) + "% T:" + String(avgDhtTemp, 1) + "C; ";
+          sensorDataSms += "DS18B20 T:" + String(avgDs18b20Temp, 1) + "C";
+          
+          // Send SMS to all numbers
+          Serial.println(F("--- Sending SMS with Average Sensor Data ---"));
+          for (int i = 0; i < NUM_PHONE_NUMBERS; i++) {
+            sendSMS(sensorDataSms, phoneNumbers[i]);
+          }
+          
+          // Reset averages
+          dhtHumSum = 0;
+          dhtTempSum = 0;
+          ds18b20TempSum = 0;
+          readingCount = 0;
+          lastSendTime = millis();
+        }
+      }
+
+      Serial.println(F("------------------------------------"));
+      Serial.println(F("Reading cycle complete. Waiting 5 minutes..."));
+      delay(300000); // 5 minute delay between readings
+    }
   } else {
-    Serial.print(F("DHT - H:"));
-    Serial.print(h);
-    Serial.print(F("% T:"));
-    Serial.print(t);
-    Serial.println(F("C"));
-    sensorDataSms += "DHT H:" + String(h, 1) + "% T:" + String(t, 1) + "C; ";
+    Serial.println(F("ADC value below 975. System idle. GSM operations paused."));
+    if (gsmIsInitializedAndReady) {
+        Serial.println(F("GSM module was active, now pausing operations. Will re-initialize if ADC condition met again."));
+        // Optionally, you could send AT+CPOWD=1 to power down the module here to save power,
+        // but then initializeAndConfigureGsmModule would need to handle waking it or a longer startup.
+        // For now, just setting the flag ensures re-initialization logic.
+    }
+    gsmIsInitializedAndReady = false; // Reset flag so GSM re-initializes if ADC goes high again
+    delay(5000); // Wait for 5 seconds before checking ADC again
   }
-
-  // --- DS18B20 Sensor Reading ---
-  delay(100);
-  Serial.println(F("--- Reading DS18B20 Sensor ---"));
-  Serial.print(F("Requesting DS18B20 temps... "));
-  ds18b20Sensors.requestTemperatures();
-  Serial.println(F("Done."));
-  float tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0);
-
-  if (tempC_ds18b20 == DEVICE_DISCONNECTED_C || tempC_ds18b20 == 85.0) {
-    Serial.println(F(">>> ERROR: Failed to read from DS18B20! <<<"));
-    sensorDataSms += "DS18B20 Err";
-  } else {
-    Serial.print(F("DS18B20 - T:"));
-    Serial.print(tempC_ds18b20);
-    Serial.println(F("C"));
-    sensorDataSms += "DS18B20 T:" + String(tempC_ds18b20, 1) + "C";
-  }
-
-  // --- Send SMS with Sensor Data ---
-  if (sensorDataSms.length() > 0) {
-    Serial.println(F("--- Sending SMS with Sensor Data ---"));
-    Serial.print(F("Message: "));
-    Serial.println(sensorDataSms);
-    sendSMS(sensorDataSms);
-  }
-
-  Serial.println(F("------------------------------------"));
-  Serial.println(F("Waiting 30 seconds before next cycle..."));
-  delay(30000);
 }
 
-// --- Read and print SIM800L response (basic version) ---
+// --- Read and print SIM800L response ---
 void readSimResponse() {
   unsigned long startTime = millis();
-  simResponseBuffer = "";
-  while (millis() - startTime < 1000) {  // Timeout after 1 second
+  simResponseBuffer = ""; 
+  while (millis() - startTime < 1000) {  
     while (sim800l.available()) {
       char c = sim800l.read();
-      Serial.write(c);  // Echo to Serial Monitor
+      Serial.write(c);  
       simResponseBuffer += c;
     }
-  }
-  if (simResponseBuffer.length() > 0) {
-    Serial.println();  // Newline after printing buffer if it had content
   }
 }
 
 // --- Handle Incoming Data from SIM800L (including SMS notifications) ---
 void handleSim800lInput() {
-  simResponseBuffer = "";  // Clear or reuse buffer
+  if (!gsmIsInitializedAndReady) return; // Don't process if GSM not ready
+
+  static String localSimBuffer = ""; 
   while (sim800l.available()) {
     char c = sim800l.read();
-    simResponseBuffer += c;
-    // Process complete lines
-    if (c == '\n') {
-      Serial.print(F("SIM_RECV: "));
-      Serial.print(simResponseBuffer);  // Print raw line
-      // Check for New SMS Notification: +CMTI: "SM",<index>
-      if (simResponseBuffer.startsWith("+CMTI:")) {
+    localSimBuffer += c;
+    if (c == '\n') { 
+      Serial.print(F("SIM_RECV_URC: "));
+      Serial.print(localSimBuffer);  
+      
+      if (localSimBuffer.startsWith("+CMTI:")) {
         Serial.println(F(">>> New SMS Notification Received! <<<"));
-        // Parse index: e.g., +CMTI: "SM",15
-        int commaIndex = simResponseBuffer.indexOf(',');
+        int commaIndex = localSimBuffer.indexOf(',');
         if (commaIndex != -1) {
-          String indexStr = simResponseBuffer.substring(commaIndex + 1);
-          indexStr.trim();  // Remove any leading/trailing whitespace/newlines
+          String indexStr = localSimBuffer.substring(commaIndex + 1);
+          indexStr.trim();  
           int messageIndex = indexStr.toInt();
           if (messageIndex > 0) {
-            Serial.print(F("Message Index: "));
-            Serial.println(messageIndex);
+            Serial.print(F("Message Index: ")); Serial.println(messageIndex);
             readSms(messageIndex);
           }
         }
       }
-      simResponseBuffer = "";  // Clear buffer for next line
+      localSimBuffer = "";  
     }
   }
 }
 
 // --- Read a specific SMS message ---
 void readSms(int messageIndex) {
-  Serial.print(F("Reading SMS at index: "));
-  Serial.println(messageIndex);
+  if (!gsmIsInitializedAndReady) return;
+
+  Serial.print(F("Reading SMS at index: ")); Serial.println(messageIndex);
   sim800l.print("AT+CMGR=");
   sim800l.println(messageIndex);
-  delay(1000);        // Wait for the response, which can be multi-line
-  readSimResponse();  // This will print the full AT+CMGR response, including message body
+  delay(1000);        
+  readSimResponse();  
 
-  // Optionally, delete the message after reading
   deleteSms(messageIndex);
 }
 
 // --- Delete a specific SMS message ---
 void deleteSms(int messageIndex) {
-  Serial.print(F("Deleting SMS at index: "));
-  Serial.println(messageIndex);
+  if (!gsmIsInitializedAndReady) return;
+
+  Serial.print(F("Deleting SMS at index: ")); Serial.println(messageIndex);
   sim800l.print("AT+CMGD=");
   sim800l.println(messageIndex);
-  delay(1000);        // Wait for response
-  readSimResponse();  // Print SIM800L's response (should be OK or ERROR)
+  delay(1000);        
+  readSimResponse();  
 }
 
-// --- Helper function to send SMS ---
-void sendSMS(String message) {
-  Serial.print(F("Setting phone number: "));
-  Serial.println(phoneNumber);
+// --- Helper function to send SMS with Timestamp ---
+void sendSMS(String message, String recipientNumber) {
+  if (!gsmIsInitializedAndReady) {
+    Serial.println(F("Cannot send SMS, GSM module not ready."));
+    return;
+  }
+
+  String timestamp = getGsmTimestamp();
+  String messageWithTimestamp;
+
+  if (timestamp == "TS_ERR" || timestamp.length() == 0) {
+    Serial.println(F("Failed to get GSM timestamp. Sending SMS with placeholder."));
+    messageWithTimestamp = "No TS - " + message; 
+  } else {
+    messageWithTimestamp = timestamp + " - " + message;
+  }
+  
+  if (messageWithTimestamp.length() > 160) {
+      Serial.print(F("Warning: SMS (len ")); Serial.print(messageWithTimestamp.length()); Serial.println(F(") is long, may be truncated or split."));
+  }
+
+  Serial.print(F("Setting phone number: ")); Serial.println(recipientNumber);
   sim800l.print("AT+CMGS=\"");
-  sim800l.print(phoneNumber);
+  sim800l.print(recipientNumber);
   sim800l.println("\"");
-  delay(1000);        // Wait for '>' prompt
-  readSimResponse();  // Should ideally check for '>' here
+  delay(1000);        
+  readSimResponse();  
 
-  Serial.print(F("Sending message: "));
-  Serial.println(message);
-  sim800l.println(message);
-  delay(100);
+  Serial.print(F("Sending full message: ")); Serial.println(messageWithTimestamp);
+  sim800l.println(messageWithTimestamp); 
+  delay(100); 
 
-  sim800l.write(26);  // CTRL+Z
-  delay(5000);        // Wait for SMS send confirmation (e.g., +CMGS: XX)
-  readSimResponse();
+  sim800l.write(26);  
+  delay(5000);        
+  readSimResponse();  
   Serial.println(F("SMS send attempt finished."));
 }
-
-// --- (Original updateSerial() removed as its functionality is partially
-//      integrated into readSimResponse and handleSim800lInput for clarity,
-//      and direct Serial->SIM forwarding is not essential for this automated flow) ---

@@ -1,9 +1,7 @@
 #include "DHT.h"  // Main DHT sensor library
 #include <OneWire.h>
 #include <DallasTemperature.h>
-// #include <SoftwareSerial.h> // Not needed if using HardwareSerial correctly
-// For STM32, ensure you are using the correct HardwareSerial include if necessary,
-// or that your core handles HardwareSerial instantiation as you've done.
+#include <EEPROM.h> // Include the EEPROM library
 
 // --- Configuration for DHT Sensor ---
 #define DHTPIN PB1     // Digital pin connected to the DHT sensor
@@ -48,6 +46,10 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 // --- SIM800L Response Buffer Timeout ---
 #define SIM800L_RESPONSE_READ_TIMEOUT 1000 // Timeout for reading SIM800L serial response
 
+// --- EEPROM Configuration ---
+#define EEPROM_COUNTER_ADDR 0 // EEPROM address to store the counter
+#define SMS_SEND_THRESHOLD 12 // Send SMS when counter reaches this value
+
 // Array of phone numbers to send SMS to
 String phoneNumbers[] = {"+94719593248", "+94719751003", "+94768378406"};
 const int NUM_PHONE_NUMBERS = 3;
@@ -56,7 +58,7 @@ const int NUM_PHONE_NUMBERS = 3;
 float dhtHumSum = 0, dhtTempSum = 0, ds18b20TempSum = 0;
 int readingCount = 0;
 unsigned long lastSendTime = 0;
-const unsigned long SEND_INTERVAL = 3600000; // 60 minutes in milliseconds
+// const unsigned long SEND_INTERVAL = 3600000; // This will be replaced by EEPROM counter logic
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -65,6 +67,7 @@ DallasTemperature ds18b20Sensors(&oneWire);
 
 String simResponseBuffer = "";  // Buffer for incoming SIM800L data
 bool gsmIsInitializedAndReady = false; // Flag to track GSM module initialization status
+int smsCounter = 0; // Counter for SMS sending
 
 // --- Function to get Timestamp from GSM Module ---
 String getGsmTimestamp() {
@@ -163,11 +166,17 @@ void setup() {
   Serial.begin(DEBUG_SERIAL_BAUDRATE); // For debugging output to PC
   while (!Serial) { delay(SERIAL_INIT_WAIT_DELAY); } // Wait for serial port to connect (needed for some boards)
   Serial.println(F("DHT, DS18B20 Sensor Test with GSM SMS (Send & Receive with Timestamp & ADC Trigger)"));
-  Serial.println(F("System will wait for ADC condition on PA0 >= 975 to initialize GSM and operate."));
+  // Serial.println(F("System will wait for ADC condition on PA0 >= 975 to initialize GSM and operate.")); // Removed ADC condition message
 
-  // ADC Pin Initialization
-  pinMode(ADC_INPUT_PIN, INPUT_ANALOG);
-  Serial.print(F("ADC Input Pin PA0 configured.\n"));
+  // Initialize EEPROM and read counter
+  EEPROM.begin(); // Initialize EEPROM
+  smsCounter = EEPROM.read(EEPROM_COUNTER_ADDR);
+  Serial.print(F("EEPROM SMS Counter initialized to: "));
+  Serial.println(smsCounter);
+  
+  // ADC Pin Initialization (Removed as per request)
+  // pinMode(ADC_INPUT_PIN, INPUT_ANALOG);
+  // Serial.print(F("ADC Input Pin PA0 configured.\n"));
 
   // Sensor Initializations (DHT & DS18B20)
   Serial.print(F("Initializing DHT Sensor (Type: DHT11, Pin: PB1)\n"));
@@ -178,24 +187,28 @@ void setup() {
   ds18b20Sensors.begin();
   Serial.println(F("DS18B20 sensor ds18b20Sensors.begin() called."));
   
-  // GSM Module will be initialized in loop() based on ADC condition
+  // GSM Module will be initialized directly now
   Serial.println(F("------------------------------------"));
+  gsmIsInitializedAndReady = initializeAndConfigureGsmModule(); // Initialize GSM directly
+  if (!gsmIsInitializedAndReady) {
+    Serial.println(F("GSM Module initialization failed during setup."));
+  }
 }
 
 // --- Loop Function: Runs repeatedly ---
 void loop() {
-  // --- ADC Reading Check ---
-  int adcValue = analogRead(ADC_INPUT_PIN);
-  Serial.print(F("Current ADC reading on PA0: "));
-  Serial.println(adcValue);
+  // --- ADC Reading Check (Removed as per request) ---
+  // int adcValue = analogRead(ADC_INPUT_PIN);
+  // Serial.print(F("Current ADC reading on PA0: "));
+  // Serial.println(adcValue);
 
-  if (adcValue >= 975) {
+  // if (adcValue >= 975) { // Removed ADC condition
     if (!gsmIsInitializedAndReady) {
-      Serial.println(F("ADC condition met. Attempting to initialize GSM module..."));
+      Serial.println(F("Attempting to initialize GSM module..."));
       gsmIsInitializedAndReady = initializeAndConfigureGsmModule();
       if (!gsmIsInitializedAndReady) {
-        Serial.println(F("GSM Module initialization failed. Will retry on next valid ADC reading."));
-        delay(GSM_INIT_FAILURE_RETRY_DELAY); // Wait before retrying or next ADC check
+        Serial.println(F("GSM Module initialization failed. Will retry after delay."));
+        delay(GSM_INIT_FAILURE_RETRY_DELAY); // Wait before retrying
         return; // Exit loop early if GSM init failed
       }
     }
@@ -233,9 +246,13 @@ void loop() {
       }
 
       readingCount++;
+      smsCounter++; // Increment SMS counter
+      EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter); // Store updated counter
+      EEPROM.commit(); // Commit changes to EEPROM
+      Serial.print(F("SMS Counter: ")); Serial.println(smsCounter);
 
-      // Check if it's time to send the averaged data (every 60 minutes)
-      if (millis() - lastSendTime >= SEND_INTERVAL) {
+      // Check if it's time to send the averaged data (every 60 minutes or counter >= 12)
+      if (smsCounter >= SMS_SEND_THRESHOLD) {
         String sensorDataSms = "";
         
         // Calculate averages
@@ -253,30 +270,34 @@ void loop() {
             sendSMS(sensorDataSms, phoneNumbers[i]);
           }
           
-          // Reset averages
+          // Reset averages and counter
           dhtHumSum = 0;
           dhtTempSum = 0;
           ds18b20TempSum = 0;
           readingCount = 0;
-          lastSendTime = millis();
+          smsCounter = 0; // Reset SMS counter
+          EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter); // Store reset counter
+          EEPROM.commit(); // Commit changes to EEPROM
+          lastSendTime = millis(); // Reset last send time
         }
       }
 
       Serial.println(F("------------------------------------"));
       Serial.println(F("Reading cycle complete. Waiting 5 minutes..."));
       delay(MAIN_LOOP_CYCLE_DELAY); // 5 minute delay between readings
+    } else {
+      // If GSM is not initialized, wait and retry
+      Serial.println(F("GSM not ready. Waiting before next attempt."));
+      delay(GSM_INIT_FAILURE_RETRY_DELAY);
     }
-  } else {
-    Serial.println(F("ADC value below 975. System idle. GSM operations paused."));
-    if (gsmIsInitializedAndReady) {
-        Serial.println(F("GSM module was active, now pausing operations. Will re-initialize if ADC condition met again."));
-        // Optionally, you could send AT+CPOWD=1 to power down the module here to save power,
-        // but then initializeAndConfigureGsmModule would need to handle waking it or a longer startup.
-        // For now, just setting the flag ensures re-initialization logic.
-    }
-    gsmIsInitializedAndReady = false; // Reset flag so GSM re-initializes if ADC goes high again
-    delay(ADC_IDLE_CHECK_DELAY); // Wait for 5 seconds before checking ADC again
-  }
+  // } else { // Removed ADC condition
+  //   Serial.println(F("ADC value below 975. System idle. GSM operations paused."));
+  //   if (gsmIsInitializedAndReady) {
+  //       Serial.println(F("GSM module was active, now pausing operations. Will re-initialize if ADC condition met again."));
+  //   }
+  //   gsmIsInitializedAndReady = false; // Reset flag so GSM re-initializes if ADC goes high again
+  //   delay(ADC_IDLE_CHECK_DELAY); // Wait for 5 seconds before checking ADC again
+  // }
 }
 
 // --- Read and print SIM800L response ---

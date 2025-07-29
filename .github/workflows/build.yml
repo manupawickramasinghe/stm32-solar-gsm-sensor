@@ -37,21 +37,15 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Cache pip
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Cache Arduino CLI
         uses: actions/cache@v3
         with:
           path: |
             ~/.arduino15
             ~/Arduino
-          key: ${{ runner.os }}-arduino-${{ hashFiles('**/Firmware/sms-stm32/sms-stm32.ino') }}
+          key: ${{ runner.os }}-arduino-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-arduino-
 
       - name: Install Arduino CLI
         run: |

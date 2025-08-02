@@ -48,11 +48,21 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 
 // --- EEPROM Configuration ---
 #define EEPROM_COUNTER_ADDR 0 // EEPROM address to store the counter
+#define EEPROM_PHONE_A_ADDR 4 // EEPROM address for phone number A (20 bytes)
+#define EEPROM_PHONE_B_ADDR 24 // EEPROM address for phone number B (20 bytes)
+#define EEPROM_PHONE_C_ADDR 44 // EEPROM address for phone number C (20 bytes)
+#define EEPROM_CUSTOMER_ID_ADDR 64 // EEPROM address for customer ID (10 bytes)
+#define EEPROM_INIT_FLAG_ADDR 74 // EEPROM address for initialization flag
 #define SMS_SEND_THRESHOLD 12 // Send SMS when counter reaches this value
 
-// Array of phone numbers to send SMS to
+// Phone number storage
+#define MAX_PHONE_LENGTH 20
+#define MAX_CUSTOMER_ID_LENGTH 10
+
+// Array of phone numbers to send SMS to (will be loaded from EEPROM)
 String phoneNumbers[] = {"+94719593248", "+94719751003", "+94768378406"};
 const int NUM_PHONE_NUMBERS = 3;
+String customerID = "00000"; // Default customer ID
 
 // State machine states
 enum SystemState {
@@ -95,6 +105,14 @@ enum SmsOperationState {
     SMS_SEND_END_WAIT
 };
 
+// SMS processing states
+enum SmsProcessingState {
+    SMS_PROC_IDLE,
+    SMS_PROC_READING,
+    SMS_PROC_PROCESSING,
+    SMS_PROC_RESPONDING
+};
+
 // Timestamp operation state
 enum TimestampState {
     TS_IDLE,
@@ -122,6 +140,12 @@ unsigned long tsTimestamp = 0;
 String pendingSmsMessage = "";
 String pendingSmsNumber = "";
 int currentPhoneIndex = 0;
+
+// SMS command processing variables
+SmsProcessingState smsProcessingState = SMS_PROC_IDLE;
+String receivedSmsContent = "";
+String senderNumber = "";
+int processingSmsIndex = 0;
 
 DHT dht(DHTPIN, DHTTYPE);
 

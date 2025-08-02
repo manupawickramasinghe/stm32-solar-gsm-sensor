@@ -10,6 +10,18 @@
 // --- Configuration for DS18B20 Sensor ---
 #define ONE_WIRE_BUS PB0  // Data wire for DS18B20
 
+// --- Configuration for Soil Moisture Sensor FC-28 ---
+#define SOIL_MOISTURE_PIN PA1 // Analog pin for soil moisture sensor
+
+// --- Configuration for MQ2 Gas Sensor ---
+#define MQ2_GAS_PIN PA4 // Analog pin for MQ2 gas sensor
+
+// --- Configuration for DIP Switches (Sensor Selection) ---
+#define DIP_SWITCH_DHT11 PC13    // DIP switch 1 for DHT11 sensor
+#define DIP_SWITCH_DS18B20 PC14  // DIP switch 2 for DS18B20 sensor
+#define DIP_SWITCH_SOIL PC15     // DIP switch 3 for Soil Moisture sensor
+#define DIP_SWITCH_MQ2 PB12      // DIP switch 4 for MQ2 Gas sensor
+
 // --- Configuration for ADC Input ---
 #define ADC_INPUT_PIN PA0 // Analog input pin for the trigger condition
 
@@ -36,6 +48,8 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 // --- Sensor Reading Delays ---
 #define DHT_READ_PRE_DELAY 2000         // Delay before reading DHT sensor
 #define DS18B20_READ_PRE_DELAY 100      // Delay before reading DS18B20 sensor
+#define SOIL_MOISTURE_READ_PRE_DELAY 100 // Delay before reading soil moisture sensor
+#define MQ2_GAS_READ_PRE_DELAY 100      // Delay before reading MQ2 gas sensor
 
 // --- Loop Control Delays ---
 #define SERIAL_INIT_WAIT_DELAY 10       // Delay for Serial port initialization
@@ -45,7 +59,7 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 
 // --- SIM800L Response Buffer Timeout ---
 #define SIM800L_RESPONSE_READ_TIMEOUT 1000 // Timeout for reading SIM800L serial response
-
+re/So 
 // --- EEPROM Configuration ---
 #define EEPROM_COUNTER_ADDR 0 // EEPROM address to store the counter
 #define EEPROM_PHONE_A_ADDR 4 // EEPROM address for phone number A (20 bytes)
@@ -71,6 +85,10 @@ enum SystemState {
     STATE_READ_DHT,
     STATE_WAIT_DS18B20,
     STATE_READ_DS18B20,
+    STATE_WAIT_SOIL_MOISTURE,
+    STATE_READ_SOIL_MOISTURE,
+    STATE_WAIT_MQ2_GAS,
+    STATE_READ_MQ2_GAS,
     STATE_PROCESS_DATA,
     STATE_IDLE
 };
@@ -121,11 +139,18 @@ enum TimestampState {
 
 // Variables for sensor averaging and timing
 float dhtHumSum = 0, dhtTempSum = 0, ds18b20TempSum = 0;
+float soilMoistureSum = 0, mq2GasSum = 0;
 int readingCount = 0;
 unsigned long lastSendTime = 0;
 unsigned long lastStateChange = 0;    // Tracks the last state change time
 unsigned long lastMainLoopTime = 0;   // Tracks the last main cycle completion
 SystemState currentState = STATE_IDLE;
+
+// DIP switch states (sensor enable/disable)
+bool dhtEnabled = false;
+bool ds18b20Enabled = false;
+bool soilMoistureEnabled = false;
+bool mq2GasEnabled = false;
 
 // GSM operation timing variables
 GsmInitState gsmInitState = GSM_INIT_START;
@@ -450,13 +475,36 @@ bool initializeAndConfigureGsmModule() {
   return (gsmInitState == GSM_INIT_COMPLETE);
 }
 
+// --- DIP Switch Reading Function ---
+void readDipSwitches() {
+  // Read DIP switches (LOW = switch activated, HIGH = switch off due to pull-up)
+  dhtEnabled = !digitalRead(DIP_SWITCH_DHT11);
+  ds18b20Enabled = !digitalRead(DIP_SWITCH_DS18B20);
+  soilMoistureEnabled = !digitalRead(DIP_SWITCH_SOIL);
+  mq2GasEnabled = !digitalRead(DIP_SWITCH_MQ2);
+  
+  Serial.println(F("DIP Switch Status:"));
+  Serial.print(F("  DHT11: ")); Serial.println(dhtEnabled ? "ENABLED" : "DISABLED");
+  Serial.print(F("  DS18B20: ")); Serial.println(ds18b20Enabled ? "ENABLED" : "DISABLED");
+  Serial.print(F("  Soil Moisture: ")); Serial.println(soilMoistureEnabled ? "ENABLED" : "DISABLED");
+  Serial.print(F("  MQ2 Gas: ")); Serial.println(mq2GasEnabled ? "ENABLED" : "DISABLED");
+}
 
 // --- Setup Function: Runs once when the Bluepill starts ---
 void setup() {
   Serial.begin(DEBUG_SERIAL_BAUDRATE); // For debugging output to PC
   // Non-blocking serial initialization - removed while(!Serial) delay loop
-  Serial.println(F("DHT, DS18B20 Sensor Test with GSM SMS (Send & Receive with Timestamp & ADC Trigger)"));
-  // Serial.println(F("System will wait for ADC condition on PA0 >= 975 to initialize GSM and operate.")); // Removed ADC condition message
+  Serial.println(F("Multi-Sensor System with DIP Switch Selection and GSM SMS"));
+
+  // Initialize DIP switches as input with pull-up
+  pinMode(DIP_SWITCH_DHT11, INPUT_PULLUP);
+  pinMode(DIP_SWITCH_DS18B20, INPUT_PULLUP);
+  pinMode(DIP_SWITCH_SOIL, INPUT_PULLUP);
+  pinMode(DIP_SWITCH_MQ2, INPUT_PULLUP);
+  Serial.println(F("DIP switches initialized"));
+  
+  // Read DIP switch states
+  readDipSwitches();
 
   // Initialize EEPROM and read counter
   smsCounter = EEPROM.read(EEPROM_COUNTER_ADDR);
@@ -466,18 +514,31 @@ void setup() {
   // Load configuration from EEPROM
   loadConfigFromEEPROM();
   
-  // ADC Pin Initialization (Removed as per request)
-  // pinMode(ADC_INPUT_PIN, INPUT_ANALOG);
-  // Serial.print(F("ADC Input Pin PA0 configured.\n"));
+  // Initialize analog pins for sensors
+  pinMode(SOIL_MOISTURE_PIN, INPUT_ANALOG);
+  pinMode(MQ2_GAS_PIN, INPUT_ANALOG);
+  Serial.println(F("Analog sensor pins configured"));
 
-  // Sensor Initializations (DHT & DS18B20)
-  Serial.print(F("Initializing DHT Sensor (Type: DHT11, Pin: PB1)\n"));
-  dht.begin();
-  Serial.println(F("DHT sensor dht.begin() called."));
+  // Sensor Initializations (only initialize if enabled by DIP switches)
+  if (dhtEnabled) {
+    Serial.print(F("Initializing DHT Sensor (Type: DHT11, Pin: PB1)\n"));
+    dht.begin();
+    Serial.println(F("DHT sensor dht.begin() called."));
+  }
 
-  Serial.print(F("Initializing DS18B20 Sensor (Pin: PB0)\n"));
-  ds18b20Sensors.begin();
-  Serial.println(F("DS18B20 sensor ds18b20Sensors.begin() called."));
+  if (ds18b20Enabled) {
+    Serial.print(F("Initializing DS18B20 Sensor (Pin: PB0)\n"));
+    ds18b20Sensors.begin();
+    Serial.println(F("DS18B20 sensor ds18b20Sensors.begin() called."));
+  }
+  
+  if (soilMoistureEnabled) {
+    Serial.println(F("Soil Moisture sensor FC-28 enabled on PA1"));
+  }
+  
+  if (mq2GasEnabled) {
+    Serial.println(F("MQ2 Gas sensor enabled on PA4"));
+  }
   
   // GSM Module will be initialized in non-blocking manner in loop
   Serial.println(F("------------------------------------"));
@@ -494,6 +555,13 @@ void loop() {
     
     // Always check for incoming SMS messages
     handleSim800lInput();
+    
+    // Periodically re-read DIP switches (every 30 seconds)
+    static unsigned long lastDipSwitchRead = 0;
+    if (millis() - lastDipSwitchRead >= 30000) {
+        readDipSwitches();
+        lastDipSwitchRead = millis();
+    }
 
     // Non-blocking GSM initialization
     if (!gsmIsInitializedAndReady) {
@@ -523,39 +591,99 @@ void loop() {
             break;
 
         case STATE_WAIT_DHT:
-            if (currentMillis - lastStateChange >= DHT_READ_PRE_DELAY) {
+            if (dhtEnabled && currentMillis - lastStateChange >= DHT_READ_PRE_DELAY) {
                 currentState = STATE_READ_DHT;
                 Serial.println(F("--- Reading DHT Sensor ---"));
+            } else if (!dhtEnabled) {
+                // Skip DHT if disabled, go to next sensor
+                currentState = STATE_WAIT_DS18B20;
+                lastStateChange = currentMillis;
             }
             break;
 
         case STATE_READ_DHT:
-            h = dht.readHumidity();
-            t = dht.readTemperature();
-            if (!isnan(h) && !isnan(t)) {
-                Serial.print(F("DHT - H:")); Serial.print(h); 
-                Serial.print(F("% T:")); Serial.print(t); Serial.println(F("C"));
-                dhtHumSum += h;
-                dhtTempSum += t;
+            if (dhtEnabled) {
+                h = dht.readHumidity();
+                t = dht.readTemperature();
+                if (!isnan(h) && !isnan(t)) {
+                    Serial.print(F("DHT - H:")); Serial.print(h); 
+                    Serial.print(F("% T:")); Serial.print(t); Serial.println(F("C"));
+                    dhtHumSum += h;
+                    dhtTempSum += t;
+                }
             }
             currentState = STATE_WAIT_DS18B20;
             lastStateChange = currentMillis;
             break;
 
         case STATE_WAIT_DS18B20:
-            if (currentMillis - lastStateChange >= DS18B20_READ_PRE_DELAY) {
+            if (ds18b20Enabled && currentMillis - lastStateChange >= DS18B20_READ_PRE_DELAY) {
                 currentState = STATE_READ_DS18B20;
                 Serial.println(F("--- Reading DS18B20 Sensor ---"));
+            } else if (!ds18b20Enabled) {
+                // Skip DS18B20 if disabled, go to next sensor
+                currentState = STATE_WAIT_SOIL_MOISTURE;
+                lastStateChange = currentMillis;
             }
             break;
 
         case STATE_READ_DS18B20:
-            ds18b20Sensors.requestTemperatures();
-            tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0);
-            if (tempC_ds18b20 != DEVICE_DISCONNECTED_C && tempC_ds18b20 != 85.0) {
-                Serial.print(F("DS18B20 - T:")); 
-                Serial.print(tempC_ds18b20); Serial.println(F("C"));
-                ds18b20TempSum += tempC_ds18b20;
+            if (ds18b20Enabled) {
+                ds18b20Sensors.requestTemperatures();
+                tempC_ds18b20 = ds18b20Sensors.getTempCByIndex(0);
+                if (tempC_ds18b20 != DEVICE_DISCONNECTED_C && tempC_ds18b20 != 85.0) {
+                    Serial.print(F("DS18B20 - T:")); 
+                    Serial.print(tempC_ds18b20); Serial.println(F("C"));
+                    ds18b20TempSum += tempC_ds18b20;
+                }
+            }
+            currentState = STATE_WAIT_SOIL_MOISTURE;
+            lastStateChange = currentMillis;
+            break;
+
+        case STATE_WAIT_SOIL_MOISTURE:
+            if (soilMoistureEnabled && currentMillis - lastStateChange >= SOIL_MOISTURE_READ_PRE_DELAY) {
+                currentState = STATE_READ_SOIL_MOISTURE;
+                Serial.println(F("--- Reading Soil Moisture Sensor ---"));
+            } else if (!soilMoistureEnabled) {
+                // Skip soil moisture if disabled, go to next sensor
+                currentState = STATE_WAIT_MQ2_GAS;
+                lastStateChange = currentMillis;
+            }
+            break;
+
+        case STATE_READ_SOIL_MOISTURE:
+            if (soilMoistureEnabled) {
+                int soilMoistureRaw = analogRead(SOIL_MOISTURE_PIN);
+                // Convert to percentage (0-4095 ADC range for STM32, inverted for soil moisture)
+                float soilMoisturePercent = map(soilMoistureRaw, 4095, 0, 0, 100);
+                soilMoisturePercent = constrain(soilMoisturePercent, 0, 100);
+                Serial.print(F("Soil Moisture - Raw:")); Serial.print(soilMoistureRaw);
+                Serial.print(F(" %:")); Serial.print(soilMoisturePercent); Serial.println(F("%"));
+                soilMoistureSum += soilMoisturePercent;
+            }
+            currentState = STATE_WAIT_MQ2_GAS;
+            lastStateChange = currentMillis;
+            break;
+
+        case STATE_WAIT_MQ2_GAS:
+            if (mq2GasEnabled && currentMillis - lastStateChange >= MQ2_GAS_READ_PRE_DELAY) {
+                currentState = STATE_READ_MQ2_GAS;
+                Serial.println(F("--- Reading MQ2 Gas Sensor ---"));
+            } else if (!mq2GasEnabled) {
+                // Skip MQ2 if disabled, go to process data
+                currentState = STATE_PROCESS_DATA;
+            }
+            break;
+
+        case STATE_READ_MQ2_GAS:
+            if (mq2GasEnabled) {
+                int mq2GasRaw = analogRead(MQ2_GAS_PIN);
+                // Convert to a relative gas concentration value (0-4095 ADC range)
+                float mq2GasValue = (mq2GasRaw / 4095.0) * 100.0; // Percentage of full scale
+                Serial.print(F("MQ2 Gas - Raw:")); Serial.print(mq2GasRaw);
+                Serial.print(F(" Level:")); Serial.print(mq2GasValue); Serial.println(F("%"));
+                mq2GasSum += mq2GasValue;
             }
             currentState = STATE_PROCESS_DATA;
             break;
@@ -567,15 +695,41 @@ void loop() {
             Serial.print(F("SMS Counter: ")); Serial.println(smsCounter);
 
             if (smsCounter >= SMS_SEND_THRESHOLD && readingCount > 0) {
-                float avgHum = dhtHumSum / readingCount;
-                float avgDhtTemp = dhtTempSum / readingCount;
-                float avgDs18b20Temp = ds18b20TempSum / readingCount;
+                // Build dynamic SMS message based on enabled sensors
+                String sensorDataSms = "ID:" + customerID + " 60min Avg - ";
+                bool hasData = false;
                 
-                String sensorDataSms = "ID:" + customerID + " 60min Avg - DHT H:" + String(avgHum, 1) + 
-                                     "% T:" + String(avgDhtTemp, 1) + "C; " +
-                                     "DS18B20 T:" + String(avgDs18b20Temp, 1) + "C";
+                if (dhtEnabled) {
+                    float avgHum = dhtHumSum / readingCount;
+                    float avgDhtTemp = dhtTempSum / readingCount;
+                    sensorDataSms += "DHT H:" + String(avgHum, 1) + "% T:" + String(avgDhtTemp, 1) + "C; ";
+                    hasData = true;
+                }
                 
-                Serial.println(F("--- Sending SMS with Average Sensor Data ---"));
+                if (ds18b20Enabled) {
+                    float avgDs18b20Temp = ds18b20TempSum / readingCount;
+                    sensorDataSms += "DS18B20 T:" + String(avgDs18b20Temp, 1) + "C; ";
+                    hasData = true;
+                }
+                
+                if (soilMoistureEnabled) {
+                    float avgSoilMoisture = soilMoistureSum / readingCount;
+                    sensorDataSms += "Soil:" + String(avgSoilMoisture, 1) + "%; ";
+                    hasData = true;
+                }
+                
+                if (mq2GasEnabled) {
+                    float avgMq2Gas = mq2GasSum / readingCount;
+                    sensorDataSms += "Gas:" + String(avgMq2Gas, 1) + "%; ";
+                    hasData = true;
+                }
+                
+                // If no sensors are enabled, just send timestamp
+                if (!hasData) {
+                    sensorDataSms = "ID:" + customerID + " No sensors enabled - Timestamp only";
+                }
+                
+                Serial.println(F("--- Sending SMS with Sensor Data ---"));
                 for (int i = 0; i < NUM_PHONE_NUMBERS; i++) {
                     sendSMS(sensorDataSms, phoneNumbers[i]);
                 }
@@ -584,6 +738,8 @@ void loop() {
                 dhtHumSum = 0;
                 dhtTempSum = 0;
                 ds18b20TempSum = 0;
+                soilMoistureSum = 0;
+                mq2GasSum = 0;
                 readingCount = 0;
                 smsCounter = 0;
                 EEPROM.write(EEPROM_COUNTER_ADDR, smsCounter);
@@ -984,12 +1140,62 @@ void parseAndExecuteSmsCommand(String command, String sender) {
   }
   // STATUS command (get current configuration)
   else if (command == "STATUS") {
+    // Re-read DIP switches to get current state
+    readDipSwitches();
+    
     response = "ID:" + customerID + " A:" + phoneNumbers[0] + " B:" + phoneNumbers[1] + " C:" + phoneNumbers[2];
+    response += " Sensors:";
+    if (dhtEnabled) response += " DHT";
+    if (ds18b20Enabled) response += " DS18B20";
+    if (soilMoistureEnabled) response += " SOIL";
+    if (mq2GasEnabled) response += " GAS";
+    if (!dhtEnabled && !ds18b20Enabled && !soilMoistureEnabled && !mq2GasEnabled) {
+      response += " NONE";
+    }
     validCommand = true;
   }
   // TEST command (simple test)
   else if (command == "TEST") {
     response = "ID:" + customerID + " Test response - system working";
+    validCommand = true;
+  }
+  // SENSOR command (get current sensor readings)
+  else if (command == "SENSOR") {
+    readDipSwitches(); // Re-read DIP switches
+    response = "ID:" + customerID + " Current:";
+    
+    if (dhtEnabled) {
+      float h = dht.readHumidity();
+      float t = dht.readTemperature();
+      if (!isnan(h) && !isnan(t)) {
+        response += " DHT H:" + String(h, 1) + "% T:" + String(t, 1) + "C;";
+      }
+    }
+    
+    if (ds18b20Enabled) {
+      ds18b20Sensors.requestTemperatures();
+      float tempC = ds18b20Sensors.getTempCByIndex(0);
+      if (tempC != DEVICE_DISCONNECTED_C && tempC != 85.0) {
+        response += " DS18B20:" + String(tempC, 1) + "C;";
+      }
+    }
+    
+    if (soilMoistureEnabled) {
+      int soilRaw = analogRead(SOIL_MOISTURE_PIN);
+      float soilPercent = map(soilRaw, 4095, 0, 0, 100);
+      response += " Soil:" + String(soilPercent, 1) + "%;";
+    }
+    
+    if (mq2GasEnabled) {
+      int gasRaw = analogRead(MQ2_GAS_PIN);
+      float gasPercent = (gasRaw / 4095.0) * 100.0;
+      response += " Gas:" + String(gasPercent, 1) + "%;";
+    }
+    
+    if (!dhtEnabled && !ds18b20Enabled && !soilMoistureEnabled && !mq2GasEnabled) {
+      response += " No sensors enabled";
+    }
+    
     validCommand = true;
   }
   

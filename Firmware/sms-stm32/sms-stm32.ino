@@ -21,7 +21,7 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 
 // --- Baud Rates ---
 #define DEBUG_SERIAL_BAUDRATE 9600
-#define SIM800L_BAUDRATE 115200
+#define SIM800L_BAUDRATE 9600
 
 // --- GSM Module Delays & Timeouts ---
 #define SIM800L_BOOTUP_DELAY 2000       // Delay after sim800l.begin()
@@ -65,6 +65,42 @@ enum SystemState {
     STATE_IDLE
 };
 
+// GSM initialization states
+enum GsmInitState {
+    GSM_INIT_START,
+    GSM_INIT_BOOT_DELAY,
+    GSM_INIT_ECHO_OFF,
+    GSM_INIT_ECHO_OFF_WAIT,
+    GSM_INIT_AT_TEST,
+    GSM_INIT_AT_TEST_WAIT,
+    GSM_INIT_CPMS,
+    GSM_INIT_CPMS_WAIT,
+    GSM_INIT_CMGF,
+    GSM_INIT_CMGF_WAIT,
+    GSM_INIT_CNMI,
+    GSM_INIT_CNMI_WAIT,
+    GSM_INIT_CREG,
+    GSM_INIT_CREG_WAIT,
+    GSM_INIT_COMPLETE,
+    GSM_INIT_FAILED
+};
+
+// SMS operation states
+enum SmsOperationState {
+    SMS_IDLE,
+    SMS_READ_WAIT,
+    SMS_DELETE_WAIT,
+    SMS_SEND_CMD_WAIT,
+    SMS_SEND_DATA_WAIT,
+    SMS_SEND_END_WAIT
+};
+
+// Timestamp operation state
+enum TimestampState {
+    TS_IDLE,
+    TS_WAITING_RESPONSE
+};
+
 // Variables for sensor averaging and timing
 float dhtHumSum = 0, dhtTempSum = 0, ds18b20TempSum = 0;
 int readingCount = 0;
@@ -72,6 +108,20 @@ unsigned long lastSendTime = 0;
 unsigned long lastStateChange = 0;    // Tracks the last state change time
 unsigned long lastMainLoopTime = 0;   // Tracks the last main cycle completion
 SystemState currentState = STATE_IDLE;
+
+// GSM operation timing variables
+GsmInitState gsmInitState = GSM_INIT_START;
+unsigned long gsmInitTimestamp = 0;
+SmsOperationState smsOpState = SMS_IDLE;
+unsigned long smsOpTimestamp = 0;
+int pendingSmsIndex = 0;
+TimestampState tsState = TS_IDLE;
+unsigned long tsTimestamp = 0;
+
+// SMS sending state variables
+String pendingSmsMessage = "";
+String pendingSmsNumber = "";
+int currentPhoneIndex = 0;
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -88,17 +138,56 @@ void handleSim800lInput();
 void readSms(int messageIndex);
 void deleteSms(int messageIndex);
 void sendSMS(String message, String recipientNumber);
+bool updateGsmInitialization();
+void updateSmsOperations();
+void updateTimestampOperation();
+bool isTimestampReady();
+void startTimestampRequest();
+void startSmsRead(int messageIndex);
+void startSmsDelete(int messageIndex);
+void startSmsSend(String message, String recipientNumber);
 
-// --- Function to get Timestamp from GSM Module ---
+// --- Non-blocking Timestamp Functions ---
+void startTimestampRequest() {
+  if (!gsmIsInitializedAndReady) {
+    Serial.println(F("GSM not ready, cannot get timestamp."));
+    tsState = TS_IDLE;
+    return;
+  }
+  Serial.println(F("Attempting to get GSM timestamp..."));
+  sim800l.println("AT+CCLK?"); // Command to query clock
+  tsState = TS_WAITING_RESPONSE;
+  tsTimestamp = millis();
+}
+
+bool isTimestampReady() {
+  return tsState == TS_IDLE;
+}
+
+void updateTimestampOperation() {
+  if (tsState == TS_WAITING_RESPONSE) {
+    if (millis() - tsTimestamp >= SIM800L_TIMESTAMP_READ_DELAY) {
+      readSimResponse();
+      tsState = TS_IDLE;
+    }
+  }
+}
+
 String getGsmTimestamp() {
   if (!gsmIsInitializedAndReady) {
     Serial.println(F("GSM not ready, cannot get timestamp."));
     return "TS_ERR";
   }
-  Serial.println(F("Attempting to get GSM timestamp..."));
-  sim800l.println("AT+CCLK?"); // Command to query clock
-  delay(SIM800L_TIMESTAMP_READ_DELAY); 
-  readSimResponse(); 
+  
+  // Start the request if not already started
+  if (tsState == TS_IDLE) {
+    startTimestampRequest();
+  }
+  
+  // Wait for completion (this makes it blocking for now, but allows other operations)
+  while (tsState != TS_IDLE) {
+    updateTimestampOperation();
+  }
 
   int cclkIndex = simResponseBuffer.indexOf("+CCLK: \"");
   if (cclkIndex != -1) {
@@ -121,70 +210,130 @@ String getGsmTimestamp() {
   return "TS_ERR"; 
 }
 
-// --- Function to Initialize and Configure GSM Module ---
+// --- Non-blocking GSM Initialization Function ---
+bool updateGsmInitialization() {
+  unsigned long currentMillis = millis();
+  
+  switch (gsmInitState) {
+    case GSM_INIT_START:
+      Serial.println(F("Attempting to initialize SIM800L GSM Module..."));
+      sim800l.begin(SIM800L_BAUDRATE);
+      gsmInitTimestamp = currentMillis;
+      gsmInitState = GSM_INIT_BOOT_DELAY;
+      return false;
+      
+    case GSM_INIT_BOOT_DELAY:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_BOOTUP_DELAY) {
+        Serial.println(F("Configuring SIM800L..."));
+        sim800l.println("ATE0");  // Echo off
+        gsmInitTimestamp = currentMillis;
+        gsmInitState = GSM_INIT_ECHO_OFF_WAIT;
+      }
+      return false;
+      
+    case GSM_INIT_ECHO_OFF_WAIT:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_GENERIC_CMD_DELAY) {
+        readSimResponse();
+        sim800l.println("AT");  // Handshake
+        gsmInitTimestamp = currentMillis;
+        gsmInitState = GSM_INIT_AT_TEST_WAIT;
+      }
+      return false;
+      
+    case GSM_INIT_AT_TEST_WAIT:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_GENERIC_CMD_DELAY) {
+        readSimResponse();
+        if (simResponseBuffer.indexOf("OK") == -1) {
+          Serial.println(F("GSM Init Error: AT command failed."));
+          gsmInitState = GSM_INIT_FAILED;
+          return false;
+        }
+        sim800l.println("AT+CPMS=\"SM\",\"SM\",\"SM\"");  // Use SIM storage for SMS
+        gsmInitTimestamp = currentMillis;
+        gsmInitState = GSM_INIT_CPMS_WAIT;
+      }
+      return false;
+      
+    case GSM_INIT_CPMS_WAIT:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_GENERIC_CMD_DELAY) {
+        readSimResponse();
+        if (simResponseBuffer.indexOf("OK") == -1) {
+          Serial.println(F("GSM Init Warning: AT+CPMS command failed or no OK."));
+        }
+        sim800l.println("AT+CMGF=1");  // Set SMS to TEXT mode
+        gsmInitTimestamp = currentMillis;
+        gsmInitState = GSM_INIT_CMGF_WAIT;
+      }
+      return false;
+      
+    case GSM_INIT_CMGF_WAIT:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_GENERIC_CMD_DELAY) {
+        readSimResponse();
+        if (simResponseBuffer.indexOf("OK") == -1) {
+          Serial.println(F("GSM Init Error: AT+CMGF=1 command failed."));
+          gsmInitState = GSM_INIT_FAILED;
+          return false;
+        }
+        sim800l.println("AT+CNMI=2,1,0,0,0"); // Configure New SMS Indication
+        gsmInitTimestamp = currentMillis;
+        gsmInitState = GSM_INIT_CNMI_WAIT;
+      }
+      return false;
+      
+    case GSM_INIT_CNMI_WAIT:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_GENERIC_CMD_DELAY) {
+        readSimResponse();
+        if (simResponseBuffer.indexOf("OK") == -1) {
+          Serial.println(F("GSM Init Warning: AT+CNMI command failed or no OK."));
+        }
+        sim800l.println("AT+CREG?");
+        gsmInitTimestamp = currentMillis;
+        gsmInitState = GSM_INIT_CREG_WAIT;
+      }
+      return false;
+      
+    case GSM_INIT_CREG_WAIT:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_CREG_RESPONSE_DELAY) {
+        readSimResponse();
+        if (simResponseBuffer.indexOf("+CREG: 0,1") == -1 && simResponseBuffer.indexOf("+CREG: 0,5") == -1) {
+          Serial.println(F("GSM Warning: Not registered on network yet. Timestamp and SMS might fail."));
+        }
+        gsmInitState = GSM_INIT_COMPLETE;
+        Serial.println(F("GSM Module Initialized and Configured successfully."));
+        return true;
+      }
+      return false;
+      
+    case GSM_INIT_FAILED:
+      gsmInitState = GSM_INIT_START; // Reset to try again
+      return false;
+      
+    case GSM_INIT_COMPLETE:
+      return true;
+  }
+  return false;
+}
+
+// --- Legacy function kept for compatibility ---
 bool initializeAndConfigureGsmModule() {
-  Serial.println(F("Attempting to initialize SIM800L GSM Module..."));
-  sim800l.begin(SIM800L_BAUDRATE); // Baud rate for SIM800L communication
-  delay(SIM800L_BOOTUP_DELAY); // Give module time to boot up after serial begin
-
-  Serial.println(F("Configuring SIM800L..."));
-  
-  sim800l.println("ATE0");  // Echo off
-  delay(SIM800L_GENERIC_CMD_DELAY);
-  readSimResponse(); 
-  // No critical check for ATE0 response, usually works or is optional.
-
-  sim800l.println("AT");  // Handshake
-  delay(SIM800L_GENERIC_CMD_DELAY);
-  readSimResponse();
-  if (simResponseBuffer.indexOf("OK") == -1) {
-    Serial.println(F("GSM Init Error: AT command failed."));
-    return false;
+  gsmInitState = GSM_INIT_START;
+  while (gsmInitState != GSM_INIT_COMPLETE && gsmInitState != GSM_INIT_FAILED) {
+    if (!updateGsmInitialization()) {
+      // Allow some processing time between states
+      unsigned long startWait = millis();
+      while (millis() - startWait < 10) {
+        // Small delay to prevent tight loop
+      }
+    }
   }
-
-  sim800l.println("AT+CPMS=\"SM\",\"SM\",\"SM\"");  // Use SIM storage for SMS
-  delay(SIM800L_GENERIC_CMD_DELAY);
-  readSimResponse();
-  if (simResponseBuffer.indexOf("OK") == -1) {
-    Serial.println(F("GSM Init Warning: AT+CPMS command failed or no OK."));
-    // This might not be critical for sending, but good for consistency
-  }
-
-  sim800l.println("AT+CMGF=1");  // Set SMS to TEXT mode
-  delay(SIM800L_GENERIC_CMD_DELAY);
-  readSimResponse();
-  if (simResponseBuffer.indexOf("OK") == -1) {
-    Serial.println(F("GSM Init Error: AT+CMGF=1 command failed."));
-    return false;
-  }
-
-  sim800l.println("AT+CNMI=2,1,0,0,0"); // Configure New SMS Indication
-  delay(SIM800L_GENERIC_CMD_DELAY);
-  readSimResponse();
-  if (simResponseBuffer.indexOf("OK") == -1) {
-    Serial.println(F("GSM Init Warning: AT+CNMI command failed or no OK."));
-    // This is important for receiving SMS notifications, but sending might still work
-  }
-  
-  // Check network registration (optional but good for ensuring timestamp/SMS success)
-  sim800l.println("AT+CREG?");
-  delay(SIM800L_CREG_RESPONSE_DELAY); // Give time for CREG response
-  readSimResponse();
-  // Expected: +CREG: 0,1 (home network) or +CREG: 0,5 (roaming)
-  if (simResponseBuffer.indexOf("+CREG: 0,1") == -1 && simResponseBuffer.indexOf("+CREG: 0,5") == -1) {
-      Serial.println(F("GSM Warning: Not registered on network yet. Timestamp and SMS might fail."));
-      // Consider if this should return false. For now, allow proceeding.
-  }
-
-  Serial.println(F("GSM Module Initialized and Configured successfully."));
-  return true;
+  return (gsmInitState == GSM_INIT_COMPLETE);
 }
 
 
 // --- Setup Function: Runs once when the Bluepill starts ---
 void setup() {
   Serial.begin(DEBUG_SERIAL_BAUDRATE); // For debugging output to PC
-  while (!Serial) { delay(SERIAL_INIT_WAIT_DELAY); } // Wait for serial port to connect (needed for some boards)
+  // Non-blocking serial initialization - removed while(!Serial) delay loop
   Serial.println(F("DHT, DS18B20 Sensor Test with GSM SMS (Send & Receive with Timestamp & ADC Trigger)"));
   // Serial.println(F("System will wait for ADC condition on PA0 >= 975 to initialize GSM and operate.")); // Removed ADC condition message
 
@@ -206,32 +355,33 @@ void setup() {
   ds18b20Sensors.begin();
   Serial.println(F("DS18B20 sensor ds18b20Sensors.begin() called."));
   
-  // GSM Module will be initialized directly now
+  // GSM Module will be initialized in non-blocking manner in loop
   Serial.println(F("------------------------------------"));
-  gsmIsInitializedAndReady = initializeAndConfigureGsmModule(); // Initialize GSM directly
-  if (!gsmIsInitializedAndReady) {
-    Serial.println(F("GSM Module initialization failed during setup."));
-  }
+  Serial.println(F("Starting non-blocking GSM initialization..."));
+  gsmInitState = GSM_INIT_START;
 }
 
 // --- Loop Function: Runs repeatedly ---
 void loop() {
+    // Always update ongoing operations
+    updateTimestampOperation();
+    updateSmsOperations();
+    
     // Always check for incoming SMS messages
     handleSim800lInput();
 
-    // Try to initialize GSM if not ready
+    // Non-blocking GSM initialization
     if (!gsmIsInitializedAndReady) {
-        static unsigned long lastGsmInitAttempt = 0;
-        if (millis() - lastGsmInitAttempt >= GSM_INIT_FAILURE_RETRY_DELAY) {
-            Serial.println(F("Attempting to initialize GSM module..."));
-            gsmIsInitializedAndReady = initializeAndConfigureGsmModule();
-            lastGsmInitAttempt = millis();
-            if (!gsmIsInitializedAndReady) {
-                Serial.println(F("GSM Module initialization failed. Will retry after delay."));
-                return;
+        gsmIsInitializedAndReady = updateGsmInitialization();
+        if (!gsmIsInitializedAndReady && gsmInitState == GSM_INIT_FAILED) {
+            static unsigned long lastGsmInitAttempt = 0;
+            if (millis() - lastGsmInitAttempt >= GSM_INIT_FAILURE_RETRY_DELAY) {
+                Serial.println(F("Retrying GSM module initialization..."));
+                gsmInitState = GSM_INIT_START;
+                lastGsmInitAttempt = millis();
             }
         }
-        return;
+        return; // Don't proceed with sensor operations until GSM is ready
     }
 
     // Main state machine for sensor readings and data processing
@@ -358,7 +508,7 @@ void handleSim800lInput() {
           int messageIndex = indexStr.toInt();
           if (messageIndex > 0) {
             Serial.print(F("Message Index: ")); Serial.println(messageIndex);
-            readSms(messageIndex);
+            startSmsRead(messageIndex);
           }
         }
       }
@@ -367,28 +517,92 @@ void handleSim800lInput() {
   }
 }
 
-// --- Read a specific SMS message ---
-void readSms(int messageIndex) {
-  if (!gsmIsInitializedAndReady) return;
+// --- Non-blocking SMS Operations ---
+void updateSmsOperations() {
+  unsigned long currentMillis = millis();
+  
+  switch (smsOpState) {
+    case SMS_READ_WAIT:
+      if (currentMillis - smsOpTimestamp >= SIM800L_SMS_READ_DELETE_DELAY) {
+        readSimResponse();
+        startSmsDelete(pendingSmsIndex);
+      }
+      break;
+      
+    case SMS_DELETE_WAIT:
+      if (currentMillis - smsOpTimestamp >= SIM800L_SMS_READ_DELETE_DELAY) {
+        readSimResponse();
+        smsOpState = SMS_IDLE;
+      }
+      break;
+      
+    case SMS_SEND_CMD_WAIT:
+      if (currentMillis - smsOpTimestamp >= SIM800L_SMS_SEND_CMD_DELAY) {
+        readSimResponse();
+        Serial.print(F("Sending full message: ")); Serial.println(pendingSmsMessage);
+        sim800l.println(pendingSmsMessage);
+        smsOpTimestamp = currentMillis;
+        smsOpState = SMS_SEND_DATA_WAIT;
+      }
+      break;
+      
+    case SMS_SEND_DATA_WAIT:
+      if (currentMillis - smsOpTimestamp >= SIM800L_SMS_SEND_DATA_DELAY) {
+        sim800l.write(26);  // CTRL+Z
+        smsOpTimestamp = currentMillis;
+        smsOpState = SMS_SEND_END_WAIT;
+      }
+      break;
+      
+    case SMS_SEND_END_WAIT:
+      if (currentMillis - smsOpTimestamp >= SIM800L_SMS_SEND_END_DELAY) {
+        readSimResponse();
+        Serial.println(F("SMS send attempt finished."));
+        smsOpState = SMS_IDLE;
+      }
+      break;
+  }
+}
 
+void startSmsRead(int messageIndex) {
+  if (smsOpState != SMS_IDLE) return; // Operation in progress
+  
   Serial.print(F("Reading SMS at index: ")); Serial.println(messageIndex);
   sim800l.print("AT+CMGR=");
   sim800l.println(messageIndex);
-  delay(SIM800L_SMS_READ_DELETE_DELAY);        
-  readSimResponse();  
-
-  deleteSms(messageIndex);
+  pendingSmsIndex = messageIndex;
+  smsOpTimestamp = millis();
+  smsOpState = SMS_READ_WAIT;
 }
 
-// --- Delete a specific SMS message ---
-void deleteSms(int messageIndex) {
-  if (!gsmIsInitializedAndReady) return;
-
+void startSmsDelete(int messageIndex) {
   Serial.print(F("Deleting SMS at index: ")); Serial.println(messageIndex);
   sim800l.print("AT+CMGD=");
   sim800l.println(messageIndex);
-  delay(SIM800L_SMS_READ_DELETE_DELAY);        
-  readSimResponse();  
+  smsOpTimestamp = millis();
+  smsOpState = SMS_DELETE_WAIT;
+}
+
+void startSmsSend(String message, String recipientNumber) {
+  if (smsOpState != SMS_IDLE) return; // Operation in progress
+  
+  Serial.print(F("Setting phone number: ")); Serial.println(recipientNumber);
+  sim800l.print("AT+CMGS=\"");
+  sim800l.print(recipientNumber);
+  sim800l.println("\"");
+  pendingSmsMessage = message;
+  pendingSmsNumber = recipientNumber;
+  smsOpTimestamp = millis();
+  smsOpState = SMS_SEND_CMD_WAIT;
+}
+
+// --- Legacy SMS functions (now use non-blocking operations) ---
+void readSms(int messageIndex) {
+  startSmsRead(messageIndex);
+}
+
+void deleteSms(int messageIndex) {
+  startSmsDelete(messageIndex);
 }
 
 // --- Helper function to send SMS with Timestamp ---
@@ -412,19 +626,15 @@ void sendSMS(String message, String recipientNumber) {
       Serial.print(F("Warning: SMS (len ")); Serial.print(messageWithTimestamp.length()); Serial.println(F(") is long, may be truncated or split."));
   }
 
-  Serial.print(F("Setting phone number: ")); Serial.println(recipientNumber);
-  sim800l.print("AT+CMGS=\"");
-  sim800l.print(recipientNumber);
-  sim800l.println("\"");
-  delay(SIM800L_SMS_SEND_CMD_DELAY);        
-  readSimResponse();  
-
-  Serial.print(F("Sending full message: ")); Serial.println(messageWithTimestamp);
-  sim800l.println(messageWithTimestamp); 
-  delay(SIM800L_SMS_SEND_DATA_DELAY); 
-
-  sim800l.write(26);  
-  delay(SIM800L_SMS_SEND_END_DELAY);        
-  readSimResponse();  
-  Serial.println(F("SMS send attempt finished."));
+  // Wait for any ongoing SMS operation to complete
+  while (smsOpState != SMS_IDLE) {
+    updateSmsOperations();
+  }
+  
+  startSmsSend(messageWithTimestamp, recipientNumber);
+  
+  // Wait for this SMS to complete before returning
+  while (smsOpState != SMS_IDLE) {
+    updateSmsOperations();
+  }
 }

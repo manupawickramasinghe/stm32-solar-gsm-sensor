@@ -211,7 +211,7 @@ The system uses a 4-position DIP switch to enable/disable individual sensors:
 - Switch DOWN (pulled to ground) = Sensor ENABLED
 - Switch UP (pulled high) = Sensor DISABLED
 
-The system reads DIP switches on startup and periodically (every 30 seconds) during operation. Only enabled sensors are read and included in SMS reports. If no sensors are enabled, the system will only send timestamp information.
+**Important**: The system reads DIP switches only during startup/boot. To change sensor configuration, modify the DIP switches and restart the system. Only enabled sensors are read and included in SMS reports. If no sensors are enabled, the system will only send timestamp information.
 
 ## SMS Commands
 The system supports remote configuration and monitoring via SMS commands. Send these commands to the SIM card phone number:

@@ -59,7 +59,7 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 
 // --- SIM800L Response Buffer Timeout ---
 #define SIM800L_RESPONSE_READ_TIMEOUT 1000 // Timeout for reading SIM800L serial response
-re/So 
+
 // --- EEPROM Configuration ---
 #define EEPROM_COUNTER_ADDR 0 // EEPROM address to store the counter
 #define EEPROM_PHONE_A_ADDR 4 // EEPROM address for phone number A (20 bytes)
@@ -555,13 +555,6 @@ void loop() {
     
     // Always check for incoming SMS messages
     handleSim800lInput();
-    
-    // Periodically re-read DIP switches (every 30 seconds)
-    static unsigned long lastDipSwitchRead = 0;
-    if (millis() - lastDipSwitchRead >= 30000) {
-        readDipSwitches();
-        lastDipSwitchRead = millis();
-    }
 
     // Non-blocking GSM initialization
     if (!gsmIsInitializedAndReady) {
@@ -1140,9 +1133,6 @@ void parseAndExecuteSmsCommand(String command, String sender) {
   }
   // STATUS command (get current configuration)
   else if (command == "STATUS") {
-    // Re-read DIP switches to get current state
-    readDipSwitches();
-    
     response = "ID:" + customerID + " A:" + phoneNumbers[0] + " B:" + phoneNumbers[1] + " C:" + phoneNumbers[2];
     response += " Sensors:";
     if (dhtEnabled) response += " DHT";
@@ -1161,7 +1151,6 @@ void parseAndExecuteSmsCommand(String command, String sender) {
   }
   // SENSOR command (get current sensor readings)
   else if (command == "SENSOR") {
-    readDipSwitches(); // Re-read DIP switches
     response = "ID:" + customerID + " Current:";
     
     if (dhtEnabled) {

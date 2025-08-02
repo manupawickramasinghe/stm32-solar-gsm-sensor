@@ -1,76 +1,61 @@
 Notes on setting STM32 up
+ 
 
-SIM_RECV_URC: +CFUN: 1
-SIM_RECV_URC: 
-SIM_RECV_URC: +CPIN: READY
-SIM_RECV_URC: 
-SIM_RECV_URC: RDY
-SIM_RECV_URC: 
-SIM_RECV_URC: +CFUN: 1
-SIM_RECV_URC: 
-SIM_RECV_URC: +CPIN: READY
-SIM_RECV_URC: 
-SIM_RECV_URC: RDY
-SIM_RECV_URC: 
-SIM_RECV_URC: +CFUN: 1
-SIM_RECV_URC: 
-SIM_RECV_URC: +CPIN: READY
-SIM_RECV_URC: 
-SIM_RECV_URC: RDY
-SIM_RECV_URC: 
-SIM_RECV_URC: +CFUN: 1
-SIM_RECV_URC: 
-SIM_RECV_URC: +CPIN: READY
-SIM_RECV_URC: 
-SIM_RECV_URC: RDY
-SIM_RECV_URC: 
-SIM_RECV_URC: +CFUN: 1
-SIM_RECV_URC: 
-SIM_RECV_URC: +CPIN: READY
-SIM_RECV_URC: 
-SIM_RECV_URC: +CFUN: 1
---- Reading DS18B20 Sensor ---
-SMS Counter: 12
---- Sending SMS with Average Sensor Data ---
-Attempting to get GSM timestamp...
-AT+CCLK?
+ SIM_RECV_URC: *PSUTTZ: 2025,8,2,16,9,33,"+22",0
+SIM_RECV_URC: DST: 0
+SIM_RECV_URC: +CIEV: 10,"41301","Mobitel","Mobitel", 0, 0
+SIM_RECV_URC: AT+CMGD=4
+SIM_RECV_URC: OK
+SIM_RECV_URC: +CMTI: "SM",4
+>>> New SMS Notification Received! <<<
+Message Index: 4
+Reading SMS at index: 4
+SIM_RECV_URC: AT+CMGR=4
+SIM_RECV_URC: +CMGR: "REC UNREAD","+94719593248","","25/08/02,21:48:15+22"
+SIM_RECV_URC: NUMSETB +94716223703
+SIM_RECV_URC: OK
+=== Raw SMS Response ===
 
-+CCLK: "25/08/02,21:10:59+22"
+=== End Raw Response ===
+Extracted SMS from: 
+Content: ''
+Deleting SMS at index: 4
+Processing SMS command: 
+SIM_RECV_URC: AT+CMGD=4
+SIM_RECV_URC: OK
+SIM_RECV_URC: +CMTI: "SM",4
+>>> New SMS Notification Received! <<<
+Message Index: 4
+Reading SMS at index: 4
+SIM_RECV_URC: AT+CMGR=4
+SIM_RECV_URC: +CMGR: "REC UNREAD","+94719593248","","25/08/02,21:48:25+22"
+SIM_RECV_URC: STATUS
+SIM_RECV_URC: OK
+=== Raw SMS Response ===
 
-OK
-Setting phone number: +94719593248
-AT+CMGS="+94719593248"
+=== End Raw Response ===|
 
-> 
-+CPIN: READY
-Sending full message: 2025-08-02 21:10:59 - ID:00000 60min Avg - DHT H:0.0% T:0.0C; DS18B20 T:0.0C
-2025-08-02 21:10:59 - ID:00000 60min Avg - DHT H:0.0% T:0.0C; DSMS send attempt finished.
-Attempting to get GSM timestamp...
-AT+CCLK?
+=== End Raw Response ===
+Extracted SMS from: 
+Content: ''
+Deleting SMS at index: 4
+Processing SMS command: 
+SIM_RECV_URC: AT+CMGD=4
+SIM_RECV_URC: OK
+SIM_RECV_URC: +CMTI: "SM",4
+>>> New SMS Notification Received! <<<
+Message Index: 4
+Reading SMS at index: 4
+SIM_RECV_URC: AT+CMGR=4
+SIM_RECV_URC: +CMGR: "REC UNREAD","+94719593248","","25/08/02,21:41:08+22"
+SIM_RECV_URC: STATUS
+SIM_RECV_URC: OK
+=== Raw SMS Response ===
 
-+CCLK: "25/08/02,21:11:09+22"
-
-OK
-
-+CPIN: READY
-Setting phone number: +94719751003
-AT+CMGS="+94719751003"
-
-> Sending full message: 2025-08-02 21:11:09 - ID:00000 60min Avg - DHT H:0.0% T:0.0C; DS18B20 T:0.0C
-2025-08-02 21:11:09 - ID:00000 60min Avg - DHT H:0.0% T:0.0C; DSMS send attempt finished.
-Attempting to get GSM timestamp...
-
-+CPIN: READY
-AT+CCLK?
-
-+CCLK: "25/08/02,21:11:18+22"
-
-OK
-Setting phone number: +94768378406
-AT+CMGS="+94768378406"
-
-> Sending full message: 2025-08-02 21:11:18 - ID:00000 60min Avg - DHT H:0.0% T:0.0C; DS18B20 T:0.0C
-2025-08-02 21:11:18 - ID:00000 60min Avg - DHT H:0.0% T:0.0C; DSMS send attempt finished.
-------------------------------------
-Reading cycle complete. Waiting for next cycle...
-SIM_RECV_URC: 
+=== End Raw Response ===
+Extracted SMS from: 
+Content: ''
+Deleting SMS at index: 4
+Processing SMS command: 
+SIM_RECV_URC: AT+CMGD=4
+SIM_RECV_URC: OK

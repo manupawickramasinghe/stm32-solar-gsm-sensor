@@ -146,6 +146,8 @@ SmsProcessingState smsProcessingState = SMS_PROC_IDLE;
 String receivedSmsContent = "";
 String senderNumber = "";
 int processingSmsIndex = 0;
+unsigned long smsProcessingTimeout = 0;
+String fullSmsResponse = ""; // Buffer to capture complete SMS response
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -370,7 +372,6 @@ bool updateGsmInitialization() {
         sim800l.println("AT+CPMS=\"SM\",\"SM\",\"SM\"");  // Use SIM storage for SMS
         gsmInitTimestamp = currentMillis;
         gsmInitState = GSM_INIT_CPMS_WAIT;
-        delay(10);
       }
       return false;
       
@@ -383,7 +384,6 @@ bool updateGsmInitialization() {
         sim800l.println("AT+CMGF=1");  // Set SMS to TEXT mode
         gsmInitTimestamp = currentMillis;
         gsmInitState = GSM_INIT_CMGF_WAIT;
-        delay(10);
       }
       return false;
       
@@ -603,21 +603,33 @@ void loop() {
 void readSimResponse() {
   unsigned long startTime = millis();
   simResponseBuffer = ""; 
+  bool dataReceived = false;
+  
   while (millis() - startTime < SIM800L_RESPONSE_READ_TIMEOUT) {  
     while (sim800l.available()) {
       char c = sim800l.read();
       Serial.write(c);  
       simResponseBuffer += c;
+      dataReceived = true;
     }
-    // Small non-blocking delay to allow more data to arrive
-    if (millis() - startTime < SIM800L_RESPONSE_READ_TIMEOUT - 50) {
-      unsigned long delayStart = millis();
-      while (millis() - delayStart < 10) {
-        // Small busy wait instead of delay()
+    
+    // If we've received data and there's been a small pause, break out
+    if (dataReceived && (millis() - startTime > 100)) {
+      unsigned long pauseStart = millis();
+      bool moreData = false;
+      while (millis() - pauseStart < 50) { // Wait 50ms for more data
+        if (sim800l.available()) {
+          moreData = true;
+          break;
+        }
       }
+      if (!moreData) break; // No more data coming, exit
     }
   }
-  Serial.println(); // Add line break for better readability
+  
+  if (dataReceived) {
+    Serial.println(); // Add line break for better readability
+  }
 }
 
 // --- Handle Incoming Data from SIM800L (including SMS notifications) ---
@@ -628,7 +640,22 @@ void handleSim800lInput() {
   while (sim800l.available()) {
     char c = sim800l.read();
     localSimBuffer += c;
+    
+    // If we're processing SMS, capture everything in fullSmsResponse
+    if (smsProcessingState == SMS_PROC_READING) {
+      fullSmsResponse += c;
+    }
+    
     if (c == '\n') { 
+      // Trim the buffer to remove extra whitespace
+      localSimBuffer.trim();
+      
+      // Skip empty lines or lines with just whitespace
+      if (localSimBuffer.length() == 0) {
+        localSimBuffer = "";
+        continue;
+      }
+      
       // Filter out common unsolicited result codes
       if (localSimBuffer.startsWith("+CFUN:") || 
           localSimBuffer.startsWith("+CPIN:") || 
@@ -640,8 +667,11 @@ void handleSim800lInput() {
         continue;
       }
       
-      Serial.print(F("SIM_RECV_URC: "));
-      Serial.print(localSimBuffer);  
+      // Only print non-empty, meaningful lines
+      if (localSimBuffer.length() > 0) {
+        Serial.print(F("SIM_RECV_URC: "));
+        Serial.println(localSimBuffer);  
+      }
       
       if (localSimBuffer.startsWith("+CMTI:")) {
         Serial.println(F(">>> New SMS Notification Received! <<<"));
@@ -657,6 +687,8 @@ void handleSim800lInput() {
             if (smsProcessingState == SMS_PROC_IDLE) {
               processingSmsIndex = messageIndex;
               smsProcessingState = SMS_PROC_READING;
+              smsProcessingTimeout = millis();
+              fullSmsResponse = ""; // Clear the SMS response buffer
               startSmsRead(messageIndex);
             } else {
               // If already processing, just read and delete
@@ -681,7 +713,8 @@ void updateSmsOperations() {
         
         // Check if this is a command processing read
         if (smsProcessingState == SMS_PROC_READING) {
-          // Extract SMS content and sender for command processing
+          // Use the captured fullSmsResponse instead of simResponseBuffer
+          simResponseBuffer = fullSmsResponse;
           extractSmsContentAndSender();
           smsProcessingState = SMS_PROC_PROCESSING;
         }
@@ -803,15 +836,27 @@ void sendSMS(String message, String recipientNumber) {
   }
 
   // Wait for any ongoing SMS operation to complete
-  while (smsOpState != SMS_IDLE) {
+  unsigned long smsWaitStart = millis();
+  while (smsOpState != SMS_IDLE && (millis() - smsWaitStart < 30000)) {
     updateSmsOperations();
+  }
+  
+  if (smsOpState != SMS_IDLE) {
+    Serial.println(F("SMS operation timeout - forcing reset"));
+    smsOpState = SMS_IDLE;
   }
   
   startSmsSend(messageWithTimestamp, recipientNumber);
   
   // Wait for this SMS to complete before returning
-  while (smsOpState != SMS_IDLE) {
+  smsWaitStart = millis();
+  while (smsOpState != SMS_IDLE && (millis() - smsWaitStart < 30000)) {
     updateSmsOperations();
+  }
+  
+  if (smsOpState != SMS_IDLE) {
+    Serial.println(F("SMS send timeout - forcing reset"));
+    smsOpState = SMS_IDLE;
   }
 }
 
@@ -843,26 +888,42 @@ void extractSmsContentAndSender() {
       }
     }
     
-    // Find the SMS content (usually after the timestamp line)
-    int contentStart = simResponseBuffer.indexOf('\n', cmgrIndex);
-    if (contentStart != -1) {
-      contentStart = simResponseBuffer.indexOf('\n', contentStart + 1); // Skip header line
-      if (contentStart != -1) {
-        contentStart++; // Move past the newline
-        int contentEnd = simResponseBuffer.indexOf('\n', contentStart);
-        if (contentEnd == -1) contentEnd = simResponseBuffer.length();
-        
+    // Find the SMS content - it comes after the header line
+    // Look for the content after +CMGR line
+    int headerEnd = simResponseBuffer.indexOf('\n', cmgrIndex);
+    if (headerEnd != -1) {
+      // The actual SMS content starts after the header
+      int contentStart = headerEnd + 1;
+      int contentEnd = simResponseBuffer.indexOf("OK", contentStart);
+      if (contentEnd == -1) {
+        contentEnd = simResponseBuffer.length();
+      }
+      
+      if (contentStart < simResponseBuffer.length()) {
         receivedSmsContent = simResponseBuffer.substring(contentStart, contentEnd);
         receivedSmsContent.trim();
+        
+        // Remove any trailing newlines or carriage returns
+        while (receivedSmsContent.endsWith("\r") || receivedSmsContent.endsWith("\n")) {
+          receivedSmsContent = receivedSmsContent.substring(0, receivedSmsContent.length() - 1);
+        }
       }
     }
   }
   
-  Serial.print(F("Extracted SMS from: ")); Serial.println(senderNumber);
+  Serial.print(F("Extracted SMS from: '")); Serial.print(senderNumber); Serial.println(F("'"));
   Serial.print(F("Content: '")); Serial.print(receivedSmsContent); Serial.println(F("'"));
 }
 
 void updateSmsProcessing() {
+  // Add timeout protection
+  if (smsProcessingState != SMS_PROC_IDLE && 
+      millis() - smsProcessingTimeout > 30000) { // 30 second timeout
+    Serial.println(F("SMS processing timeout - resetting"));
+    smsProcessingState = SMS_PROC_IDLE;
+    return;
+  }
+  
   switch (smsProcessingState) {
     case SMS_PROC_PROCESSING:
       parseAndExecuteSmsCommand(receivedSmsContent, senderNumber);
@@ -875,7 +936,8 @@ void parseAndExecuteSmsCommand(String command, String sender) {
   command.trim();
   command.toUpperCase();
   
-  Serial.print(F("Processing SMS command: ")); Serial.println(command);
+  Serial.print(F("Processing SMS command: '")); Serial.print(command); Serial.println(F("'"));
+  Serial.print(F("From sender: '")); Serial.print(sender); Serial.println(F("'"));
   
   String response = "";
   bool validCommand = false;
@@ -933,10 +995,12 @@ void parseAndExecuteSmsCommand(String command, String sender) {
   
   // Send response if it was a valid command
   if (validCommand && response.length() > 0) {
-    Serial.println(F("Sending command response..."));
+    Serial.print(F("Sending command response: '")); Serial.print(response); Serial.println(F("'"));
     sendSMS(response, sender);
   } else if (command.length() > 0) {
     Serial.println(F("Invalid SMS command received"));
     sendSMS("ID:" + customerID + " Invalid command", sender);
+  } else {
+    Serial.println(F("Empty SMS command - no response sent"));
   }
 }

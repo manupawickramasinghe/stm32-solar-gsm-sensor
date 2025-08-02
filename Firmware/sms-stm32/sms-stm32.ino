@@ -170,6 +170,13 @@ void startTimestampRequest();
 void startSmsRead(int messageIndex);
 void startSmsDelete(int messageIndex);
 void startSmsSend(String message, String recipientNumber);
+void loadConfigFromEEPROM();
+void savePhoneNumberToEEPROM(int index, String phoneNumber);
+void saveCustomerIDToEEPROM(String id);
+void processSmsCommand(String smsContent, String sender);
+void updateSmsProcessing();
+void parseAndExecuteSmsCommand(String command, String sender);
+void extractSmsContentAndSender();
 
 // --- Non-blocking Timestamp Functions ---
 void startTimestampRequest() {
@@ -232,6 +239,84 @@ String getGsmTimestamp() {
   }
   Serial.println(F("Error parsing CCLK response or CCLK not found in buffer."));
   return "TS_ERR"; 
+}
+
+// --- EEPROM Configuration Functions ---
+void loadConfigFromEEPROM() {
+  // Check if EEPROM has been initialized
+  if (EEPROM.read(EEPROM_INIT_FLAG_ADDR) != 0x55) {
+    Serial.println(F("EEPROM not initialized, using defaults and saving them."));
+    // Save default values to EEPROM
+    savePhoneNumberToEEPROM(0, phoneNumbers[0]);
+    savePhoneNumberToEEPROM(1, phoneNumbers[1]);
+    savePhoneNumberToEEPROM(2, phoneNumbers[2]);
+    saveCustomerIDToEEPROM(customerID);
+    EEPROM.write(EEPROM_INIT_FLAG_ADDR, 0x55); // Mark as initialized
+  } else {
+    Serial.println(F("Loading configuration from EEPROM..."));
+    // Load phone numbers
+    for (int i = 0; i < NUM_PHONE_NUMBERS; i++) {
+      phoneNumbers[i] = "";
+      int addr = EEPROM_PHONE_A_ADDR + (i * MAX_PHONE_LENGTH);
+      for (int j = 0; j < MAX_PHONE_LENGTH; j++) {
+        char c = EEPROM.read(addr + j);
+        if (c == 0 || c == 255) break; // End of string
+        phoneNumbers[i] += c;
+      }
+    }
+    
+    // Load customer ID
+    customerID = "";
+    for (int i = 0; i < MAX_CUSTOMER_ID_LENGTH; i++) {
+      char c = EEPROM.read(EEPROM_CUSTOMER_ID_ADDR + i);
+      if (c == 0 || c == 255) break; // End of string
+      customerID += c;
+    }
+  }
+  
+  Serial.println(F("Configuration loaded:"));
+  Serial.print(F("Phone A: ")); Serial.println(phoneNumbers[0]);
+  Serial.print(F("Phone B: ")); Serial.println(phoneNumbers[1]);
+  Serial.print(F("Phone C: ")); Serial.println(phoneNumbers[2]);
+  Serial.print(F("Customer ID: ")); Serial.println(customerID);
+}
+
+void savePhoneNumberToEEPROM(int index, String phoneNumber) {
+  if (index < 0 || index >= NUM_PHONE_NUMBERS) return;
+  
+  int addr = EEPROM_PHONE_A_ADDR + (index * MAX_PHONE_LENGTH);
+  phoneNumbers[index] = phoneNumber;
+  
+  // Clear the EEPROM area first
+  for (int i = 0; i < MAX_PHONE_LENGTH; i++) {
+    EEPROM.write(addr + i, 0);
+  }
+  
+  // Write the new phone number
+  for (int i = 0; i < phoneNumber.length() && i < MAX_PHONE_LENGTH - 1; i++) {
+    EEPROM.write(addr + i, phoneNumber[i]);
+  }
+  
+  Serial.print(F("Phone number ")); 
+  Serial.print((char)('A' + index)); 
+  Serial.print(F(" saved: ")); 
+  Serial.println(phoneNumber);
+}
+
+void saveCustomerIDToEEPROM(String id) {
+  customerID = id;
+  
+  // Clear the EEPROM area first
+  for (int i = 0; i < MAX_CUSTOMER_ID_LENGTH; i++) {
+    EEPROM.write(EEPROM_CUSTOMER_ID_ADDR + i, 0);
+  }
+  
+  // Write the new customer ID
+  for (int i = 0; i < id.length() && i < MAX_CUSTOMER_ID_LENGTH - 1; i++) {
+    EEPROM.write(EEPROM_CUSTOMER_ID_ADDR + i, id[i]);
+  }
+  
+  Serial.print(F("Customer ID saved: ")); Serial.println(id);
 }
 
 // --- Non-blocking GSM Initialization Function ---
@@ -366,6 +451,9 @@ void setup() {
   Serial.print(F("EEPROM SMS Counter initialized to: "));
   Serial.println(smsCounter);
   
+  // Load configuration from EEPROM
+  loadConfigFromEEPROM();
+  
   // ADC Pin Initialization (Removed as per request)
   // pinMode(ADC_INPUT_PIN, INPUT_ANALOG);
   // Serial.print(F("ADC Input Pin PA0 configured.\n"));
@@ -390,6 +478,7 @@ void loop() {
     // Always update ongoing operations
     updateTimestampOperation();
     updateSmsOperations();
+    updateSmsProcessing();
     
     // Always check for incoming SMS messages
     handleSim800lInput();
@@ -470,7 +559,7 @@ void loop() {
                 float avgDhtTemp = dhtTempSum / readingCount;
                 float avgDs18b20Temp = ds18b20TempSum / readingCount;
                 
-                String sensorDataSms = "60min Avg - DHT H:" + String(avgHum, 1) + 
+                String sensorDataSms = "ID:" + customerID + " 60min Avg - DHT H:" + String(avgHum, 1) + 
                                      "% T:" + String(avgDhtTemp, 1) + "C; " +
                                      "DS18B20 T:" + String(avgDs18b20Temp, 1) + "C";
                 
@@ -532,7 +621,16 @@ void handleSim800lInput() {
           int messageIndex = indexStr.toInt();
           if (messageIndex > 0) {
             Serial.print(F("Message Index: ")); Serial.println(messageIndex);
-            startSmsRead(messageIndex);
+            
+            // Start SMS command processing
+            if (smsProcessingState == SMS_PROC_IDLE) {
+              processingSmsIndex = messageIndex;
+              smsProcessingState = SMS_PROC_READING;
+              startSmsRead(messageIndex);
+            } else {
+              // If already processing, just read and delete
+              startSmsRead(messageIndex);
+            }
           }
         }
       }
@@ -549,6 +647,14 @@ void updateSmsOperations() {
     case SMS_READ_WAIT:
       if (currentMillis - smsOpTimestamp >= SIM800L_SMS_READ_DELETE_DELAY) {
         readSimResponse();
+        
+        // Check if this is a command processing read
+        if (smsProcessingState == SMS_PROC_READING) {
+          // Extract SMS content and sender for command processing
+          extractSmsContentAndSender();
+          smsProcessingState = SMS_PROC_PROCESSING;
+        }
+        
         startSmsDelete(pendingSmsIndex);
       }
       break;
@@ -660,5 +766,112 @@ void sendSMS(String message, String recipientNumber) {
   // Wait for this SMS to complete before returning
   while (smsOpState != SMS_IDLE) {
     updateSmsOperations();
+  }
+}
+
+// --- SMS Command Processing Functions ---
+void extractSmsContentAndSender() {
+  receivedSmsContent = "";
+  senderNumber = "";
+  
+  // Parse the SMS response to extract sender and content
+  // Expected format: +CMGR: "REC UNREAD","+1234567890","","YY/MM/DD,HH:MM:SS+TZ"
+  int firstQuote = simResponseBuffer.indexOf('"', simResponseBuffer.indexOf("+CMGR:"));
+  if (firstQuote != -1) {
+    int secondQuote = simResponseBuffer.indexOf('"', firstQuote + 1);
+    if (secondQuote != -1) {
+      int thirdQuote = simResponseBuffer.indexOf('"', secondQuote + 1);
+      if (thirdQuote != -1) {
+        int fourthQuote = simResponseBuffer.indexOf('"', thirdQuote + 1);
+        if (fourthQuote != -1) {
+          senderNumber = simResponseBuffer.substring(thirdQuote + 1, fourthQuote);
+        }
+      }
+    }
+  }
+  
+  // Extract SMS content (after the last timestamp line)
+  int lastNewline = simResponseBuffer.lastIndexOf('\n');
+  int secondLastNewline = simResponseBuffer.lastIndexOf('\n', lastNewline - 1);
+  if (secondLastNewline != -1) {
+    receivedSmsContent = simResponseBuffer.substring(secondLastNewline + 1, lastNewline);
+    receivedSmsContent.trim();
+  }
+  
+  Serial.print(F("Extracted SMS from: ")); Serial.println(senderNumber);
+  Serial.print(F("Content: ")); Serial.println(receivedSmsContent);
+}
+
+void updateSmsProcessing() {
+  switch (smsProcessingState) {
+    case SMS_PROC_PROCESSING:
+      parseAndExecuteSmsCommand(receivedSmsContent, senderNumber);
+      smsProcessingState = SMS_PROC_IDLE;
+      break;
+  }
+}
+
+void parseAndExecuteSmsCommand(String command, String sender) {
+  command.trim();
+  command.toUpperCase();
+  
+  Serial.print(F("Processing SMS command: ")); Serial.println(command);
+  
+  String response = "";
+  bool validCommand = false;
+  
+  // NUMSETA command
+  if (command.startsWith("NUMSETA ")) {
+    String newNumber = command.substring(8);
+    newNumber.trim();
+    if (newNumber.length() > 0) {
+      savePhoneNumberToEEPROM(0, newNumber);
+      response = "ID:" + customerID + " NUMSETA updated to " + newNumber;
+      validCommand = true;
+    }
+  }
+  // NUMSETB command
+  else if (command.startsWith("NUMSETB ")) {
+    String newNumber = command.substring(8);
+    newNumber.trim();
+    if (newNumber.length() > 0) {
+      savePhoneNumberToEEPROM(1, newNumber);
+      response = "ID:" + customerID + " NUMSETB updated to " + newNumber;
+      validCommand = true;
+    }
+  }
+  // NUMSETC command
+  else if (command.startsWith("NUMSETC ")) {
+    String newNumber = command.substring(8);
+    newNumber.trim();
+    if (newNumber.length() > 0) {
+      savePhoneNumberToEEPROM(2, newNumber);
+      response = "ID:" + customerID + " NUMSETC updated to " + newNumber;
+      validCommand = true;
+    }
+  }
+  // SETID command
+  else if (command.startsWith("SETID ")) {
+    String newID = command.substring(6);
+    newID.trim();
+    if (newID.length() > 0 && newID.length() <= MAX_CUSTOMER_ID_LENGTH - 1) {
+      saveCustomerIDToEEPROM(newID);
+      response = "ID:" + customerID + " Customer ID updated to " + newID;
+      validCommand = true;
+    }
+  }
+  // STATUS command (get current configuration)
+  else if (command == "STATUS") {
+    response = "ID:" + customerID + " A:" + phoneNumbers[0] + " B:" + phoneNumbers[1] + " C:" + phoneNumbers[2];
+    validCommand = true;
+  }
+  
+  // Send response if it was a valid command
+  if (validCommand && response.length() > 0) {
+    Serial.println(F("Sending command response..."));
+    sendSMS(response, sender);
+  } else if (command.length() > 0) {
+    Serial.println(F("Invalid SMS command received"));
+    sendSMS("ID:" + customerID + " Invalid command", sender);
   }
 }

@@ -24,14 +24,14 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 #define SIM800L_BAUDRATE 9600
 
 // --- GSM Module Delays & Timeouts ---
-#define SIM800L_BOOTUP_DELAY 2000       // Delay after sim800l.begin()
-#define SIM800L_GENERIC_CMD_DELAY 500   // General delay after AT commands
-#define SIM800L_CREG_RESPONSE_DELAY 1000 // Delay for CREG? command response
-#define SIM800L_TIMESTAMP_READ_DELAY 200 // Delay for AT+CCLK? command response
-#define SIM800L_SMS_READ_DELETE_DELAY 1000 // Delay for AT+CMGR/CMGD commands
-#define SIM800L_SMS_SEND_CMD_DELAY 1000 // Delay after AT+CMGS command
-#define SIM800L_SMS_SEND_DATA_DELAY 100 // Delay after sending SMS message content
-#define SIM800L_SMS_SEND_END_DELAY 5000 // Delay after sending CTRL+Z for SMS
+#define SIM800L_BOOTUP_DELAY 3000       // Increased delay after sim800l.begin()
+#define SIM800L_GENERIC_CMD_DELAY 1000  // Increased general delay after AT commands
+#define SIM800L_CREG_RESPONSE_DELAY 2000 // Increased delay for CREG? command response
+#define SIM800L_TIMESTAMP_READ_DELAY 1000 // Increased delay for AT+CCLK? command response
+#define SIM800L_SMS_READ_DELETE_DELAY 2000 // Increased delay for AT+CMGR/CMGD commands
+#define SIM800L_SMS_SEND_CMD_DELAY 3000 // Increased delay after AT+CMGS command
+#define SIM800L_SMS_SEND_DATA_DELAY 1000 // Increased delay after sending SMS message content
+#define SIM800L_SMS_SEND_END_DELAY 10000 // Increased delay after sending CTRL+Z for SMS
 
 // --- Sensor Reading Delays ---
 #define DHT_READ_PRE_DELAY 2000         // Delay before reading DHT sensor
@@ -343,6 +343,16 @@ bool updateGsmInitialization() {
     case GSM_INIT_ECHO_OFF_WAIT:
       if (currentMillis - gsmInitTimestamp >= SIM800L_GENERIC_CMD_DELAY) {
         readSimResponse();
+        // Disable unsolicited result codes
+        sim800l.println("AT+CIURC=0"); // Disable URC
+        gsmInitTimestamp = currentMillis;
+        gsmInitState = GSM_INIT_AT_TEST;
+      }
+      return false;
+      
+    case GSM_INIT_AT_TEST:
+      if (currentMillis - gsmInitTimestamp >= SIM800L_GENERIC_CMD_DELAY) {
+        readSimResponse();
         sim800l.println("AT");  // Handshake
         gsmInitTimestamp = currentMillis;
         gsmInitState = GSM_INIT_AT_TEST_WAIT;
@@ -360,6 +370,7 @@ bool updateGsmInitialization() {
         sim800l.println("AT+CPMS=\"SM\",\"SM\",\"SM\"");  // Use SIM storage for SMS
         gsmInitTimestamp = currentMillis;
         gsmInitState = GSM_INIT_CPMS_WAIT;
+        delay(10);
       }
       return false;
       
@@ -372,6 +383,7 @@ bool updateGsmInitialization() {
         sim800l.println("AT+CMGF=1");  // Set SMS to TEXT mode
         gsmInitTimestamp = currentMillis;
         gsmInitState = GSM_INIT_CMGF_WAIT;
+        delay(10);
       }
       return false;
       
@@ -597,7 +609,15 @@ void readSimResponse() {
       Serial.write(c);  
       simResponseBuffer += c;
     }
+    // Small non-blocking delay to allow more data to arrive
+    if (millis() - startTime < SIM800L_RESPONSE_READ_TIMEOUT - 50) {
+      unsigned long delayStart = millis();
+      while (millis() - delayStart < 10) {
+        // Small busy wait instead of delay()
+      }
+    }
   }
+  Serial.println(); // Add line break for better readability
 }
 
 // --- Handle Incoming Data from SIM800L (including SMS notifications) ---
@@ -609,6 +629,17 @@ void handleSim800lInput() {
     char c = sim800l.read();
     localSimBuffer += c;
     if (c == '\n') { 
+      // Filter out common unsolicited result codes
+      if (localSimBuffer.startsWith("+CFUN:") || 
+          localSimBuffer.startsWith("+CPIN:") || 
+          localSimBuffer.startsWith("RDY") ||
+          localSimBuffer.startsWith("SMS Ready") ||
+          localSimBuffer.startsWith("Call Ready")) {
+        // Just acknowledge these without printing
+        localSimBuffer = "";
+        continue;
+      }
+      
       Serial.print(F("SIM_RECV_URC: "));
       Serial.print(localSimBuffer);  
       
@@ -669,10 +700,20 @@ void updateSmsOperations() {
     case SMS_SEND_CMD_WAIT:
       if (currentMillis - smsOpTimestamp >= SIM800L_SMS_SEND_CMD_DELAY) {
         readSimResponse();
-        Serial.print(F("Sending full message: ")); Serial.println(pendingSmsMessage);
-        sim800l.println(pendingSmsMessage);
-        smsOpTimestamp = currentMillis;
-        smsOpState = SMS_SEND_DATA_WAIT;
+        // Check if we got the ">" prompt
+        if (simResponseBuffer.indexOf(">") != -1) {
+          Serial.print(F("Sending full message: ")); Serial.println(pendingSmsMessage);
+          sim800l.print(pendingSmsMessage); // Use print instead of println to avoid extra newline
+          smsOpTimestamp = currentMillis;
+          smsOpState = SMS_SEND_DATA_WAIT;
+        } else {
+          Serial.println(F("No SMS prompt received, retrying..."));
+          // Retry the command
+          sim800l.print("AT+CMGS=\"");
+          sim800l.print(pendingSmsNumber);
+          sim800l.println("\"");
+          smsOpTimestamp = currentMillis;
+        }
       }
       break;
       
@@ -687,7 +728,12 @@ void updateSmsOperations() {
     case SMS_SEND_END_WAIT:
       if (currentMillis - smsOpTimestamp >= SIM800L_SMS_SEND_END_DELAY) {
         readSimResponse();
-        Serial.println(F("SMS send attempt finished."));
+        // Check if SMS was sent successfully
+        if (simResponseBuffer.indexOf("+CMGS:") != -1 || simResponseBuffer.indexOf("OK") != -1) {
+          Serial.println(F("SMS sent successfully!"));
+        } else {
+          Serial.println(F("SMS send may have failed - no confirmation received"));
+        }
         smsOpState = SMS_IDLE;
       }
       break;
@@ -774,32 +820,46 @@ void extractSmsContentAndSender() {
   receivedSmsContent = "";
   senderNumber = "";
   
+  Serial.println(F("=== Raw SMS Response ==="));
+  Serial.println(simResponseBuffer);
+  Serial.println(F("=== End Raw Response ==="));
+  
   // Parse the SMS response to extract sender and content
   // Expected format: +CMGR: "REC UNREAD","+1234567890","","YY/MM/DD,HH:MM:SS+TZ"
-  int firstQuote = simResponseBuffer.indexOf('"', simResponseBuffer.indexOf("+CMGR:"));
-  if (firstQuote != -1) {
-    int secondQuote = simResponseBuffer.indexOf('"', firstQuote + 1);
-    if (secondQuote != -1) {
-      int thirdQuote = simResponseBuffer.indexOf('"', secondQuote + 1);
-      if (thirdQuote != -1) {
-        int fourthQuote = simResponseBuffer.indexOf('"', thirdQuote + 1);
-        if (fourthQuote != -1) {
-          senderNumber = simResponseBuffer.substring(thirdQuote + 1, fourthQuote);
+  int cmgrIndex = simResponseBuffer.indexOf("+CMGR:");
+  if (cmgrIndex != -1) {
+    // Find the sender number between quotes
+    int firstQuote = simResponseBuffer.indexOf('"', cmgrIndex);
+    if (firstQuote != -1) {
+      int secondQuote = simResponseBuffer.indexOf('"', firstQuote + 1);
+      if (secondQuote != -1) {
+        int thirdQuote = simResponseBuffer.indexOf('"', secondQuote + 1);
+        if (thirdQuote != -1) {
+          int fourthQuote = simResponseBuffer.indexOf('"', thirdQuote + 1);
+          if (fourthQuote != -1) {
+            senderNumber = simResponseBuffer.substring(thirdQuote + 1, fourthQuote);
+          }
         }
+      }
+    }
+    
+    // Find the SMS content (usually after the timestamp line)
+    int contentStart = simResponseBuffer.indexOf('\n', cmgrIndex);
+    if (contentStart != -1) {
+      contentStart = simResponseBuffer.indexOf('\n', contentStart + 1); // Skip header line
+      if (contentStart != -1) {
+        contentStart++; // Move past the newline
+        int contentEnd = simResponseBuffer.indexOf('\n', contentStart);
+        if (contentEnd == -1) contentEnd = simResponseBuffer.length();
+        
+        receivedSmsContent = simResponseBuffer.substring(contentStart, contentEnd);
+        receivedSmsContent.trim();
       }
     }
   }
   
-  // Extract SMS content (after the last timestamp line)
-  int lastNewline = simResponseBuffer.lastIndexOf('\n');
-  int secondLastNewline = simResponseBuffer.lastIndexOf('\n', lastNewline - 1);
-  if (secondLastNewline != -1) {
-    receivedSmsContent = simResponseBuffer.substring(secondLastNewline + 1, lastNewline);
-    receivedSmsContent.trim();
-  }
-  
   Serial.print(F("Extracted SMS from: ")); Serial.println(senderNumber);
-  Serial.print(F("Content: ")); Serial.println(receivedSmsContent);
+  Serial.print(F("Content: '")); Serial.print(receivedSmsContent); Serial.println(F("'"));
 }
 
 void updateSmsProcessing() {
@@ -863,6 +923,11 @@ void parseAndExecuteSmsCommand(String command, String sender) {
   // STATUS command (get current configuration)
   else if (command == "STATUS") {
     response = "ID:" + customerID + " A:" + phoneNumbers[0] + " B:" + phoneNumbers[1] + " C:" + phoneNumbers[2];
+    validCommand = true;
+  }
+  // TEST command (simple test)
+  else if (command == "TEST") {
+    response = "ID:" + customerID + " Test response - system working";
     validCommand = true;
   }
   

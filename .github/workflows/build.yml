@@ -113,6 +113,9 @@ jobs:
           tag_name: release-${{ github.sha }}
           files: |
             release-files/sms-stm32-bluepill.bin
+            release-files/sms-stm32-bluepill.hex
+            release-files/sms-stm32-bluepill.map
+            release-files/sms-stm32-bluepill.elf
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4

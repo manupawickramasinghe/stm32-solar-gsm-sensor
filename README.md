@@ -200,18 +200,19 @@ The board will now boot into your application. You can open the Arduino IDE's Se
 - **GSM Helper Functions**: Functions like `sendSMS()`, `getGsmTimestamp()`, and `handleSim800lInput()` abstract the complexity of communicating with the SIM800L module.
 
 ## DIP Switch Configuration
-The system uses a 4-position DIP switch to enable/disable individual sensors:
+The system uses a 5-position DIP switch to enable/disable individual sensors and MQTT publishing:
 
 - **DIP Switch 1 (PC13)**: DHT11 Temperature & Humidity Sensor
 - **DIP Switch 2 (PC14)**: DS18B20 Waterproof Temperature Sensor  
 - **DIP Switch 3 (PC15)**: FC-28 Soil Moisture Sensor
 - **DIP Switch 4 (PB12)**: MQ2 Gas Sensor
+- **DIP Switch 5 (PB13)**: MQTT Publishing to test.mosquitto.org
 
 **Switch Logic**: 
-- Switch DOWN (pulled to ground) = Sensor ENABLED
-- Switch UP (pulled high) = Sensor DISABLED
+- Switch DOWN (pulled to ground) = Feature ENABLED
+- Switch UP (pulled high) = Feature DISABLED
 
-**Important**: The system reads DIP switches only during startup/boot. To change sensor configuration, modify the DIP switches and restart the system. Only enabled sensors are read and included in SMS reports. If no sensors are enabled, the system will only send timestamp information.
+**Important**: The system reads DIP switches only during startup/boot. To change sensor or MQTT configuration, modify the DIP switches and restart the system. Only enabled sensors are read and included in SMS reports. If MQTT is enabled, data will be published to test.mosquitto.org after SMS transmission.
 
 ## SMS Commands
 The system supports remote configuration and monitoring via SMS commands. Send these commands to the SIM card phone number:
@@ -223,12 +224,37 @@ The system supports remote configuration and monitoring via SMS commands. Send t
 - **`SETID 12345`**: Set customer ID (max 9 characters)
 
 ### Status Commands
-- **`STATUS`**: Get current configuration and enabled sensors
+- **`STATUS`**: Get current configuration, enabled sensors, and MQTT status
 - **`TEST`**: Simple connectivity test
 - **`SENSOR`**: Get current real-time sensor readings from enabled sensors
+- **`MQTT`**: Test MQTT publishing (if MQTT enabled)
 
 ### Example SMS Responses
-- **STATUS**: `ID:12345 A:+94719593248 B:+94719751003 C:+94768378406 Sensors: DHT DS18B20 SOIL`
+- **STATUS**: `ID:12345 A:+94719593248 B:+94719751003 C:+94768378406 Sensors: DHT DS18B20 SOIL MQTT`
 - **SENSOR**: `ID:12345 Current: DHT H:65.2% T:28.4C; DS18B20:27.8C; Soil:45.3%;`
+- **MQTT**: `ID:12345 MQTT test publish initiated`
+
+## MQTT Integration
+When the MQTT DIP switch is enabled (DIP Switch 5), the system will:
+
+1. **Automatic Publishing**: After sending SMS data, automatically publish sensor data to MQTT
+2. **MQTT Broker**: Uses test.mosquitto.org on port 1883 (public test broker)
+3. **Topic Structure**: `sensors/stm32/{customer_id}`
+4. **Data Format**: JSON payload with sensor readings and metadata
+5. **Manual Testing**: Use `MQTT` SMS command to test publishing
+
+### MQTT Data Example
+```json
+{
+  "customer_id": "FARM01",
+  "timestamp": "2025-08-03 14:30:15",
+  "dht_humidity": 65.2,
+  "dht_temperature": 28.4,
+  "ds18b20_temperature": 27.8,
+  "soil_moisture": 45.3,
+  "gas_level": 12.1,
+  "reading_count": 12
+}
+```
 
 All configurations are saved to EEPROM and persist across power cycles.

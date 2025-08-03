@@ -100,6 +100,9 @@ jobs:
           # Create release directory and copy binary
           mkdir -p ../../release-files
           cp sms-stm32.ino.bin ../../release-files/sms-stm32-bluepill.bin
+          cp sms-stm32.ino.elf ../../release-files/sms-stm32-bluepill.elf
+          cp sms-stm32.ino.hex ../../release-files/sms-stm32-bluepill.hex
+          cp sms-stm32.ino.map ../../release-files/sms-stm32-bluepill.map
 
       - name: Upload Release Assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

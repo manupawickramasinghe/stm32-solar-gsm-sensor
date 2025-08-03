@@ -1,14 +1,21 @@
 # stm32-solar-gsm-sensor
 Firmware and hardware guide for an open-source, solar-powered agricultural sensor system based on the STM32 "Blue Pill" and a SIM800L GSM module.
 
-This project is designed for remote environmental monitoring. It periodically reads data from temperature and humidity sensors, aggregates the data, and sends a summary report via SMS to a predefined list of phone numbers. It is optimized for low-power operation, making it suitable for solar or battery-powered deployments.
+This project is designed for remote environmental monitoring. It periodically reads data from multiple sensors based on DIP switch configuration, aggregates the data, and sends a summary report via SMS to a predefined list of phone numbers. It is optimized for low-power operation, making it suitable for solar or battery-powered deployments.
 
 ## Features
-- **Dual Temperature Sensing**: Reads ambient temperature and humidity from a DHT11 sensor and precise temperature from a waterproof DS18B20 sensor.
+- **Multi-Sensor Support with DIP Switch Selection**: 
+  - DHT11 temperature and humidity sensor
+  - DS18B20 waterproof temperature sensor
+  - FC-28 soil moisture sensor
+  - MQ2 gas sensor
+  - 4-position DIP switch for enabling/disabling individual sensors
 
 - **GSM Connectivity**: Uses a SIM800L module to connect to the cellular network for sending and receiving SMS messages.
 
-- **Periodic Data Reporting**: The device wakes up every 5 minutes to take a sensor reading.
+- **Periodic Data Reporting**: The device wakes up every 5 minutes to take sensor readings from enabled sensors only.
+
+- **Dynamic SMS Content**: SMS reports include only data from sensors that are enabled via DIP switches. If no sensors are enabled, only timestamp is sent.
 
 - **Averaged Data SMS**: After a set number of readings (e.g., 12 readings over 60 minutes), it calculates the average sensor values and sends a consolidated report via SMS.
 
@@ -18,28 +25,31 @@ This project is designed for remote environmental monitoring. It periodically re
 
 - **Persistent Counter**: Uses Flash memory emulation (since the STM32F103C8T6 does not have built-in EEPROM) to save its reading counter, ensuring it can resume its cycle even after a power loss or reset.
 
-- **Remote Control (Basic)**: Capable of receiving and processing incoming SMS messages.
+- **Remote Control via SMS**: Comprehensive SMS command system for remote configuration and monitoring.
 
 ## Hardware Requirements
 - **Microcontroller**: STM32F103C8T6 "Blue Pill" board.
 
 - **GSM Module**: SIM800L module (ensure it comes with a spring antenna and a valid 2G SIM card).
 
+- **DIP Switch**: 4-position DIP switch for sensor selection.
+
 - **Sensors**:
+  - DHT11 Temperature and Humidity Sensor (Pin: PB1)
+  - DS18B20 Waterproof Temperature Sensor (Pin: PB0) with 4.7kΩ pull-up resistor
+  - FC-28 Soil Moisture Sensor (Analog Pin: PA1)
+  - MQ2 Gas Sensor (Analog Pin: PA4)
 
-  - DHT11 Temperature and Humidity Sensor.
-
-  - DS18B20 Waterproof Temperature Sensor.
-
-  - A 4.7kΩ pull-up resistor for the DS18B20 data line.
+- **Pin Assignments for DIP Switches**:
+  - DIP Switch 1 (DHT11): PC13
+  - DIP Switch 2 (DS18B20): PC14  
+  - DIP Switch 3 (Soil Moisture): PC15
+  - DIP Switch 4 (MQ2 Gas): PB12
 
 - **Programmer**: FTDI FT232RL USB-to-Serial adapter for flashing the firmware.
 
 - **Power Supply**:
-
   - A stable power source for the SIM800L is critical. A 3.7V LiPo battery or a dedicated buck converter capable of supplying at least 2A peak current is highly recommended. Powering the SIM800L directly from the Blue Pill's 3.3V pin will cause instability.
-
-- **Miscellaneous**: Jumper wires, breadboard.
 
 ## Software & Setup (Arduino IDE)
 This project is built using the Arduino IDE with the official STM32 core.
@@ -188,3 +198,37 @@ The board will now boot into your application. You can open the Arduino IDE's Se
   - Finally, it resets the summing variables and the `smsCounter` back to zero and waits for 5 minutes (`MAIN_LOOP_CYCLE_DELAY`) before starting the next cycle.
 
 - **GSM Helper Functions**: Functions like `sendSMS()`, `getGsmTimestamp()`, and `handleSim800lInput()` abstract the complexity of communicating with the SIM800L module.
+
+## DIP Switch Configuration
+The system uses a 4-position DIP switch to enable/disable individual sensors:
+
+- **DIP Switch 1 (PC13)**: DHT11 Temperature & Humidity Sensor
+- **DIP Switch 2 (PC14)**: DS18B20 Waterproof Temperature Sensor  
+- **DIP Switch 3 (PC15)**: FC-28 Soil Moisture Sensor
+- **DIP Switch 4 (PB12)**: MQ2 Gas Sensor
+
+**Switch Logic**: 
+- Switch DOWN (pulled to ground) = Sensor ENABLED
+- Switch UP (pulled high) = Sensor DISABLED
+
+**Important**: The system reads DIP switches only during startup/boot. To change sensor configuration, modify the DIP switches and restart the system. Only enabled sensors are read and included in SMS reports. If no sensors are enabled, the system will only send timestamp information.
+
+## SMS Commands
+The system supports remote configuration and monitoring via SMS commands. Send these commands to the SIM card phone number:
+
+### Configuration Commands
+- **`NUMSETA +1234567890`**: Set phone number A
+- **`NUMSETB +1234567890`**: Set phone number B  
+- **`NUMSETC +1234567890`**: Set phone number C
+- **`SETID 12345`**: Set customer ID (max 9 characters)
+
+### Status Commands
+- **`STATUS`**: Get current configuration and enabled sensors
+- **`TEST`**: Simple connectivity test
+- **`SENSOR`**: Get current real-time sensor readings from enabled sensors
+
+### Example SMS Responses
+- **STATUS**: `ID:12345 A:+94719593248 B:+94719751003 C:+94768378406 Sensors: DHT DS18B20 SOIL`
+- **SENSOR**: `ID:12345 Current: DHT H:65.2% T:28.4C; DS18B20:27.8C; Soil:45.3%;`
+
+All configurations are saved to EEPROM and persist across power cycles.

@@ -2,6 +2,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h> // Include the EEPROM library
+#include <PubSubClient.h> // MQTT library for SIM800L
 
 // --- Configuration for DHT Sensor ---
 #define DHTPIN PB1     // Digital pin connected to the DHT sensor
@@ -21,6 +22,7 @@
 #define DIP_SWITCH_DS18B20 PC14  // DIP switch 2 for DS18B20 sensor
 #define DIP_SWITCH_SOIL PC15     // DIP switch 3 for Soil Moisture sensor
 #define DIP_SWITCH_MQ2 PB12      // DIP switch 4 for MQ2 Gas sensor
+#define DIP_SWITCH_MQTT PB13     // DIP switch 5 for MQTT publishing
 
 // --- Configuration for ADC Input ---
 #define ADC_INPUT_PIN PA0 // Analog input pin for the trigger condition
@@ -59,6 +61,14 @@ HardwareSerial sim800l(GSM_RX_PIN, GSM_TX_PIN); // Assumes this constructor work
 
 // --- SIM800L Response Buffer Timeout ---
 #define SIM800L_RESPONSE_READ_TIMEOUT 1000 // Timeout for reading SIM800L serial response
+
+// --- MQTT Configuration ---
+#define MQTT_SERVER "test.mosquitto.org"
+#define MQTT_PORT 1883
+#define MQTT_CLIENT_ID "STM32_Sensor_"
+#define MQTT_TOPIC_PREFIX "zektopic/sensors/stm32/"
+#define MQTT_CONNECT_TIMEOUT 10000    // 10 seconds for MQTT connection
+#define MQTT_PUBLISH_TIMEOUT 5000     // 5 seconds for MQTT publish
 
 // --- EEPROM Configuration ---
 #define EEPROM_COUNTER_ADDR 0 // EEPROM address to store the counter
@@ -137,6 +147,25 @@ enum TimestampState {
     TS_WAITING_RESPONSE
 };
 
+// MQTT operation states
+enum MqttOperationState {
+    MQTT_IDLE,
+    MQTT_GPRS_ATTACH,
+    MQTT_GPRS_ATTACH_WAIT,
+    MQTT_SET_APN, // Added state for setting APN
+    MQTT_SET_APN_WAIT, // Added state for waiting for APN response
+    MQTT_ACTIVATE_GPRS, // Added state for activating GPRS connection
+    MQTT_ACTIVATE_GPRS_WAIT, // Added state for waiting for GPRS activation response
+    MQTT_TCP_CONNECT,
+    MQTT_TCP_CONNECT_WAIT,
+    MQTT_PUBLISH_DATA,
+    MQTT_PUBLISH_WAIT,
+    MQTT_DISCONNECT,
+    MQTT_DISCONNECT_WAIT,
+    MQTT_COMPLETE,
+    MQTT_FAILED
+};
+
 // Variables for sensor averaging and timing
 float dhtHumSum = 0, dhtTempSum = 0, ds18b20TempSum = 0;
 float soilMoistureSum = 0, mq2GasSum = 0;
@@ -151,6 +180,7 @@ bool dhtEnabled = false;
 bool ds18b20Enabled = false;
 bool soilMoistureEnabled = false;
 bool mq2GasEnabled = false;
+bool mqttEnabled = false;
 
 // GSM operation timing variables
 GsmInitState gsmInitState = GSM_INIT_START;
@@ -160,6 +190,12 @@ unsigned long smsOpTimestamp = 0;
 int pendingSmsIndex = 0;
 TimestampState tsState = TS_IDLE;
 unsigned long tsTimestamp = 0;
+
+// MQTT operation timing variables
+MqttOperationState mqttOpState = MQTT_IDLE;
+unsigned long mqttOpTimestamp = 0;
+String pendingMqttData = "";
+bool mqttPublishPending = false;
 
 // SMS sending state variables
 String pendingSmsMessage = "";
@@ -204,6 +240,9 @@ void processSmsCommand(String smsContent, String sender);
 void updateSmsProcessing();
 void parseAndExecuteSmsCommand(String command, String sender);
 void extractSmsContentAndSender();
+void updateMqttOperations();
+void startMqttPublish(String jsonData);
+String buildSensorJsonData();
 
 // --- Non-blocking Timestamp Functions ---
 void startTimestampRequest() {
@@ -444,6 +483,13 @@ bool updateGsmInitialization() {
         if (simResponseBuffer.indexOf("+CREG: 0,1") == -1 && simResponseBuffer.indexOf("+CREG: 0,5") == -1) {
           Serial.println(F("GSM Warning: Not registered on network yet. Timestamp and SMS might fail."));
         }
+        // If MQTT is enabled, we need to ensure GPRS is ready
+        if (mqttEnabled) {
+            Serial.println(F("MQTT enabled, proceeding to GPRS setup."));
+            // Start GPRS setup immediately after GSM initialization
+            mqttOpState = MQTT_GPRS_ATTACH;
+            mqttOpTimestamp = currentMillis;
+        }
         gsmInitState = GSM_INIT_COMPLETE;
         Serial.println(F("GSM Module Initialized and Configured successfully."));
         return true;
@@ -482,12 +528,14 @@ void readDipSwitches() {
   ds18b20Enabled = !digitalRead(DIP_SWITCH_DS18B20);
   soilMoistureEnabled = !digitalRead(DIP_SWITCH_SOIL);
   mq2GasEnabled = !digitalRead(DIP_SWITCH_MQ2);
+  mqttEnabled = !digitalRead(DIP_SWITCH_MQTT);
   
   Serial.println(F("DIP Switch Status:"));
   Serial.print(F("  DHT11: ")); Serial.println(dhtEnabled ? "ENABLED" : "DISABLED");
   Serial.print(F("  DS18B20: ")); Serial.println(ds18b20Enabled ? "ENABLED" : "DISABLED");
   Serial.print(F("  Soil Moisture: ")); Serial.println(soilMoistureEnabled ? "ENABLED" : "DISABLED");
   Serial.print(F("  MQ2 Gas: ")); Serial.println(mq2GasEnabled ? "ENABLED" : "DISABLED");
+  Serial.print(F("  MQTT: ")); Serial.println(mqttEnabled ? "ENABLED" : "DISABLED");
 }
 
 // --- Setup Function: Runs once when the Bluepill starts ---
@@ -501,6 +549,7 @@ void setup() {
   pinMode(DIP_SWITCH_DS18B20, INPUT_PULLUP);
   pinMode(DIP_SWITCH_SOIL, INPUT_PULLUP);
   pinMode(DIP_SWITCH_MQ2, INPUT_PULLUP);
+  pinMode(DIP_SWITCH_MQTT, INPUT_PULLUP);
   Serial.println(F("DIP switches initialized"));
   
   // Read DIP switch states
@@ -540,6 +589,10 @@ void setup() {
     Serial.println(F("MQ2 Gas sensor enabled on PA4"));
   }
   
+  if (mqttEnabled) {
+    Serial.println(F("MQTT publishing to test.mosquitto.org enabled"));
+  }
+  
   // GSM Module will be initialized in non-blocking manner in loop
   Serial.println(F("------------------------------------"));
   Serial.println(F("Starting non-blocking GSM initialization..."));
@@ -552,6 +605,7 @@ void loop() {
     updateTimestampOperation();
     updateSmsOperations();
     updateSmsProcessing();
+    updateMqttOperations();
     
     // Always check for incoming SMS messages
     handleSim800lInput();
@@ -725,6 +779,13 @@ void loop() {
                 Serial.println(F("--- Sending SMS with Sensor Data ---"));
                 for (int i = 0; i < NUM_PHONE_NUMBERS; i++) {
                     sendSMS(sensorDataSms, phoneNumbers[i]);
+                }
+                
+                // Start MQTT publishing if enabled
+                if (mqttEnabled) {
+                    Serial.println(F("--- Preparing MQTT Data Publishing ---"));
+                    String jsonData = buildSensorJsonData();
+                    startMqttPublish(jsonData);
                 }
                 
                 // Reset averages and counter
@@ -1139,7 +1200,8 @@ void parseAndExecuteSmsCommand(String command, String sender) {
     if (ds18b20Enabled) response += " DS18B20";
     if (soilMoistureEnabled) response += " SOIL";
     if (mq2GasEnabled) response += " GAS";
-    if (!dhtEnabled && !ds18b20Enabled && !soilMoistureEnabled && !mq2GasEnabled) {
+    if (mqttEnabled) response += " MQTT";
+    if (!dhtEnabled && !ds18b20Enabled && !soilMoistureEnabled && !mq2GasEnabled && !mqttEnabled) {
       response += " NONE";
     }
     validCommand = true;
@@ -1187,6 +1249,17 @@ void parseAndExecuteSmsCommand(String command, String sender) {
     
     validCommand = true;
   }
+  // MQTT command (test MQTT publishing)
+  else if (command == "MQTT") {
+    if (mqttEnabled) {
+      String testJson = "{\"customer_id\":\"" + customerID + "\",\"test\":\"manual_trigger\",\"timestamp\":\"" + getGsmTimestamp() + "\"}";
+      startMqttPublish(testJson);
+      response = "ID:" + customerID + " MQTT test publish initiated";
+    } else {
+      response = "ID:" + customerID + " MQTT disabled - check DIP switch";
+    }
+    validCommand = true;
+  }
   
   // Send response if it was a valid command
   if (validCommand && response.length() > 0) {
@@ -1198,4 +1271,196 @@ void parseAndExecuteSmsCommand(String command, String sender) {
   } else {
     Serial.println(F("Empty SMS command - no response sent"));
   }
+}
+
+// --- MQTT Functions ---
+String buildSensorJsonData() {
+  String json = "{";
+  json += "\"customer_id\":\"" + customerID + "\",";
+  json += "\"timestamp\":\"" + getGsmTimestamp() + "\",";
+  
+  if (dhtEnabled && readingCount > 0) {
+    float avgHum = dhtHumSum / readingCount;
+    float avgDhtTemp = dhtTempSum / readingCount;
+    json += "\"dht_humidity\":" + String(avgHum, 1) + ",";
+    json += "\"dht_temperature\":" + String(avgDhtTemp, 1) + ",";
+  }
+  
+  if (ds18b20Enabled && readingCount > 0) {
+    float avgDs18b20Temp = ds18b20TempSum / readingCount;
+    json += "\"ds18b20_temperature\":" + String(avgDs18b20Temp, 1) + ",";
+  }
+  
+  if (soilMoistureEnabled && readingCount > 0) {
+    float avgSoilMoisture = soilMoistureSum / readingCount;
+    json += "\"soil_moisture\":" + String(avgSoilMoisture, 1) + ",";
+  }
+  
+  if (mq2GasEnabled && readingCount > 0) {
+    float avgMq2Gas = mq2GasSum / readingCount;
+    json += "\"gas_level\":" + String(avgMq2Gas, 1) + ",";
+  }
+  
+  json += "\"reading_count\":" + String(readingCount);
+  json += "}";
+  
+  return json;
+}
+
+void startMqttPublish(String jsonData) {
+  if (mqttOpState != MQTT_IDLE) {
+    Serial.println(F("MQTT operation already in progress"));
+    return;
+  }
+  
+  pendingMqttData = jsonData;
+  mqttOpState = MQTT_GPRS_ATTACH; // Start the GPRS attachment process
+  mqttOpTimestamp = millis();
+  mqttPublishPending = true;
+  
+  Serial.println(F("Starting MQTT publish sequence..."));
+}
+
+void updateMqttOperations() {
+  if (!mqttEnabled || !mqttPublishPending) return;
+  
+  unsigned long currentMillis = millis();
+  
+  switch (mqttOpState) {
+    case MQTT_GPRS_ATTACH:
+      Serial.println(F("Attaching to GPRS..."));
+      sim800l.println("AT+CGATT=1"); // Attach to GPRS
+      mqttOpTimestamp = currentMillis;
+      mqttOpState = MQTT_GPRS_ATTACH_WAIT;
+      break;
+      
+    case MQTT_GPRS_ATTACH_WAIT:
+      if (currentMillis - mqttOpTimestamp >= 5000) { // Increased timeout for GPRS attach
+        readSimResponse();
+        // Configure APN (using generic APN, replace "internet" with your APN if needed)
+        sim800l.println("AT+CSTT=\"Mobitel\""); // Set APN
+        mqttOpTimestamp = currentMillis;
+        mqttOpState = MQTT_SET_APN_WAIT;
+      }
+      break;
+
+    case MQTT_SET_APN_WAIT:
+      if (currentMillis - mqttOpTimestamp >= 2000) { // Wait for APN command
+        readSimResponse();
+        sim800l.println("AT+CIICR"); // Bring up wireless connection
+        mqttOpTimestamp = currentMillis;
+        mqttOpState = MQTT_ACTIVATE_GPRS_WAIT;
+      }
+      break;
+
+    case MQTT_ACTIVATE_GPRS_WAIT:
+      if (currentMillis - mqttOpTimestamp >= 10000) { // Wait for GPRS activation
+        readSimResponse();
+        Serial.println(F("GPRS activated."));
+        sim800l.println("AT+CIFSR"); // Get local IP address
+        mqttOpTimestamp = currentMillis;
+        mqttOpState = MQTT_TCP_CONNECT;
+      }
+      break;
+      
+    case MQTT_TCP_CONNECT:
+      if (currentMillis - mqttOpTimestamp >= 3000) {
+        readSimResponse();
+        // Start TCP connection to MQTT broker
+        sim800l.print("AT+CIPSTART=\"TCP\",\"");
+        sim800l.print(MQTT_SERVER);
+        sim800l.print("\",");
+        sim800l.println(MQTT_PORT);
+        mqttOpTimestamp = currentMillis;
+        mqttOpState = MQTT_TCP_CONNECT_WAIT;
+      }
+      break;
+      
+    case MQTT_TCP_CONNECT_WAIT:
+      if (currentMillis - mqttOpTimestamp >= MQTT_CONNECT_TIMEOUT) {
+        readSimResponse();
+        if (simResponseBuffer.indexOf("CONNECT OK") != -1) {
+          Serial.println(F("TCP Connected, publishing MQTT data..."));
+          
+          // Build MQTT publish packet
+          String topic = String(MQTT_TOPIC_PREFIX) + customerID;
+          String mqttPacket = buildMqttPublishPacket(topic, pendingMqttData);
+          
+          sim800l.print("AT+CIPSEND=");
+          sim800l.println(mqttPacket.length());
+          mqttOpTimestamp = currentMillis;
+          mqttOpState = MQTT_PUBLISH_DATA;
+        } else {
+          Serial.println(F("TCP connection failed"));
+          mqttOpState = MQTT_FAILED;
+        }
+      }
+      break;
+      
+    case MQTT_PUBLISH_DATA:
+      if (currentMillis - mqttOpTimestamp >= 1000) { // Short delay before sending data
+        readSimResponse(); // Read any response from AT+CIPSEND=...
+        if (simResponseBuffer.indexOf(">") != -1) { // Check for prompt
+          sim800l.print(pendingMqttData); // Send the actual data
+          mqttOpTimestamp = currentMillis;
+          mqttOpState = MQTT_PUBLISH_WAIT;
+        } else {
+          Serial.println(F("No '>' prompt received for CIPSEND"));
+          mqttOpState = MQTT_FAILED;
+        }
+      }
+      break;
+      
+    case MQTT_PUBLISH_WAIT:
+      if (currentMillis - mqttOpTimestamp >= MQTT_PUBLISH_TIMEOUT) {
+        readSimResponse(); // Read the final response after sending data
+        Serial.println(F("MQTT publish completed"));
+        sim800l.println("AT+CIPCLOSE"); // Close TCP connection
+        mqttOpTimestamp = currentMillis;
+        mqttOpState = MQTT_DISCONNECT_WAIT;
+      }
+      break;
+      
+    case MQTT_DISCONNECT_WAIT:
+      if (currentMillis - mqttOpTimestamp >= 2000) {
+        readSimResponse();
+        mqttOpState = MQTT_COMPLETE;
+      }
+      break;
+      
+    case MQTT_COMPLETE:
+      Serial.println(F("MQTT operation completed successfully"));
+      mqttOpState = MQTT_IDLE;
+      mqttPublishPending = false;
+      break;
+      
+    case MQTT_FAILED:
+      Serial.println(F("MQTT operation failed"));
+      // Attempt to close any open connection if failed
+      sim800l.println("AT+CIPCLOSE");
+      delay(1000);
+      readSimResponse();
+      mqttOpState = MQTT_IDLE;
+      mqttPublishPending = false;
+      break;
+  }
+}
+
+String buildMqttPublishPacket(String topic, String payload) {
+  // This function is not strictly needed for the SIM800L's AT+CIPSEND command
+  // as the AT command handles the MQTT framing. We just need to send the topic and payload.
+  // However, if a direct TCP socket was used, this would be necessary.
+  // For AT+CIPSEND, we just need to send the topic and payload directly.
+  
+  // The AT+CIPSEND command expects the topic and payload to be sent after it.
+  // The SIM800L module handles the MQTT packet framing.
+  
+  // We will construct a string that includes the topic and payload,
+  // which will be sent after the AT+CIPSEND command and the '>' prompt.
+  
+  String packet = "";
+  packet += topic;
+  packet += payload;
+  
+  return packet;
 }

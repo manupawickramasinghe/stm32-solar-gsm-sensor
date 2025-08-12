@@ -152,6 +152,10 @@ enum MqttOperationState {
     MQTT_IDLE,
     MQTT_GPRS_ATTACH,
     MQTT_GPRS_ATTACH_WAIT,
+    MQTT_SET_APN, // Added state for setting APN
+    MQTT_SET_APN_WAIT, // Added state for waiting for APN response
+    MQTT_ACTIVATE_GPRS, // Added state for activating GPRS connection
+    MQTT_ACTIVATE_GPRS_WAIT, // Added state for waiting for GPRS activation response
     MQTT_TCP_CONNECT,
     MQTT_TCP_CONNECT_WAIT,
     MQTT_PUBLISH_DATA,
@@ -478,6 +482,13 @@ bool updateGsmInitialization() {
         readSimResponse();
         if (simResponseBuffer.indexOf("+CREG: 0,1") == -1 && simResponseBuffer.indexOf("+CREG: 0,5") == -1) {
           Serial.println(F("GSM Warning: Not registered on network yet. Timestamp and SMS might fail."));
+        }
+        // If MQTT is enabled, we need to ensure GPRS is ready
+        if (mqttEnabled) {
+            Serial.println(F("MQTT enabled, proceeding to GPRS setup."));
+            // Start GPRS setup immediately after GSM initialization
+            mqttOpState = MQTT_GPRS_ATTACH;
+            mqttOpTimestamp = currentMillis;
         }
         gsmInitState = GSM_INIT_COMPLETE;
         Serial.println(F("GSM Module Initialized and Configured successfully."));
@@ -1303,7 +1314,7 @@ void startMqttPublish(String jsonData) {
   }
   
   pendingMqttData = jsonData;
-  mqttOpState = MQTT_GPRS_ATTACH;
+  mqttOpState = MQTT_GPRS_ATTACH; // Start the GPRS attachment process
   mqttOpTimestamp = millis();
   mqttPublishPending = true;
   
@@ -1324,10 +1335,29 @@ void updateMqttOperations() {
       break;
       
     case MQTT_GPRS_ATTACH_WAIT:
-      if (currentMillis - mqttOpTimestamp >= 5000) {
+      if (currentMillis - mqttOpTimestamp >= 5000) { // Increased timeout for GPRS attach
         readSimResponse();
-        // Configure APN (using generic APN)
-        sim800l.println("AT+CSTT=\"internet\""); // Set APN
+        // Configure APN (using generic APN, replace "internet" with your APN if needed)
+        sim800l.println("AT+CSTT=\"Mobitel\""); // Set APN
+        mqttOpTimestamp = currentMillis;
+        mqttOpState = MQTT_SET_APN_WAIT;
+      }
+      break;
+
+    case MQTT_SET_APN_WAIT:
+      if (currentMillis - mqttOpTimestamp >= 2000) { // Wait for APN command
+        readSimResponse();
+        sim800l.println("AT+CIICR"); // Bring up wireless connection
+        mqttOpTimestamp = currentMillis;
+        mqttOpState = MQTT_ACTIVATE_GPRS_WAIT;
+      }
+      break;
+
+    case MQTT_ACTIVATE_GPRS_WAIT:
+      if (currentMillis - mqttOpTimestamp >= 10000) { // Wait for GPRS activation
+        readSimResponse();
+        Serial.println(F("GPRS activated."));
+        sim800l.println("AT+CIFSR"); // Get local IP address
         mqttOpTimestamp = currentMillis;
         mqttOpState = MQTT_TCP_CONNECT;
       }
@@ -1336,24 +1366,18 @@ void updateMqttOperations() {
     case MQTT_TCP_CONNECT:
       if (currentMillis - mqttOpTimestamp >= 3000) {
         readSimResponse();
-        sim800l.println("AT+CIICR"); // Bring up wireless connection
+        // Start TCP connection to MQTT broker
+        sim800l.print("AT+CIPSTART=\"TCP\",\"");
+        sim800l.print(MQTT_SERVER);
+        sim800l.print("\",");
+        sim800l.println(MQTT_PORT);
         mqttOpTimestamp = currentMillis;
         mqttOpState = MQTT_TCP_CONNECT_WAIT;
       }
       break;
       
     case MQTT_TCP_CONNECT_WAIT:
-      if (currentMillis - mqttOpTimestamp >= 10000) {
-        readSimResponse();
-        // Start TCP connection to MQTT broker
-        sim800l.println("AT+CIPSTART=\"TCP\",\"test.mosquitto.org\",\"1883\"");
-        mqttOpTimestamp = currentMillis;
-        mqttOpState = MQTT_PUBLISH_DATA;
-      }
-      break;
-      
-    case MQTT_PUBLISH_DATA:
-      if (currentMillis - mqttOpTimestamp >= 10000) {
+      if (currentMillis - mqttOpTimestamp >= MQTT_CONNECT_TIMEOUT) {
         readSimResponse();
         if (simResponseBuffer.indexOf("CONNECT OK") != -1) {
           Serial.println(F("TCP Connected, publishing MQTT data..."));
@@ -1364,11 +1388,8 @@ void updateMqttOperations() {
           
           sim800l.print("AT+CIPSEND=");
           sim800l.println(mqttPacket.length());
-          delay(100);
-          sim800l.print(mqttPacket);
-          
           mqttOpTimestamp = currentMillis;
-          mqttOpState = MQTT_PUBLISH_WAIT;
+          mqttOpState = MQTT_PUBLISH_DATA;
         } else {
           Serial.println(F("TCP connection failed"));
           mqttOpState = MQTT_FAILED;
@@ -1376,9 +1397,23 @@ void updateMqttOperations() {
       }
       break;
       
+    case MQTT_PUBLISH_DATA:
+      if (currentMillis - mqttOpTimestamp >= 1000) { // Short delay before sending data
+        readSimResponse(); // Read any response from AT+CIPSEND=...
+        if (simResponseBuffer.indexOf(">") != -1) { // Check for prompt
+          sim800l.print(pendingMqttData); // Send the actual data
+          mqttOpTimestamp = currentMillis;
+          mqttOpState = MQTT_PUBLISH_WAIT;
+        } else {
+          Serial.println(F("No '>' prompt received for CIPSEND"));
+          mqttOpState = MQTT_FAILED;
+        }
+      }
+      break;
+      
     case MQTT_PUBLISH_WAIT:
       if (currentMillis - mqttOpTimestamp >= MQTT_PUBLISH_TIMEOUT) {
-        readSimResponse();
+        readSimResponse(); // Read the final response after sending data
         Serial.println(F("MQTT publish completed"));
         sim800l.println("AT+CIPCLOSE"); // Close TCP connection
         mqttOpTimestamp = currentMillis;
@@ -1401,6 +1436,10 @@ void updateMqttOperations() {
       
     case MQTT_FAILED:
       Serial.println(F("MQTT operation failed"));
+      // Attempt to close any open connection if failed
+      sim800l.println("AT+CIPCLOSE");
+      delay(1000);
+      readSimResponse();
       mqttOpState = MQTT_IDLE;
       mqttPublishPending = false;
       break;
@@ -1408,28 +1447,20 @@ void updateMqttOperations() {
 }
 
 String buildMqttPublishPacket(String topic, String payload) {
-  // Simple MQTT publish packet builder
-  // This is a basic implementation for demonstration
+  // This function is not strictly needed for the SIM800L's AT+CIPSEND command
+  // as the AT command handles the MQTT framing. We just need to send the topic and payload.
+  // However, if a direct TCP socket was used, this would be necessary.
+  // For AT+CIPSEND, we just need to send the topic and payload directly.
+  
+  // The AT+CIPSEND command expects the topic and payload to be sent after it.
+  // The SIM800L module handles the MQTT packet framing.
+  
+  // We will construct a string that includes the topic and payload,
+  // which will be sent after the AT+CIPSEND command and the '>' prompt.
+  
   String packet = "";
-  
-  // MQTT Connect packet (simplified)
-  packet += (char)0x10; // Connect packet type
-  packet += (char)0x12; // Remaining length
-  packet += (char)0x00; packet += (char)0x04; // Protocol name length
-  packet += "MQTT"; // Protocol name
-  packet += (char)0x04; // Protocol level
-  packet += (char)0x02; // Connect flags
-  packet += (char)0x00; packet += (char)0x3C; // Keep alive
-  packet += (char)0x00; packet += (char)0x08; // Client ID length
-  packet += "STM32Sns"; // Client ID
-  
-  // MQTT Publish packet
-  packet += (char)0x30; // Publish packet type
-  int remainingLength = 2 + topic.length() + payload.length();
-  packet += (char)remainingLength; // Remaining length
-  packet += (char)0x00; packet += (char)topic.length(); // Topic length
-  packet += topic; // Topic
-  packet += payload; // Payload
+  packet += topic;
+  packet += payload;
   
   return packet;
 }

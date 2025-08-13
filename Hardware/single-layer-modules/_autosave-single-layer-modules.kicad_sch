@@ -5731,7 +5731,6 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "4a4390b3-285f-4ada-b9c9-34c029d4efdc")
 		(property "Reference" "J5"
 			(at 187.96 73.6599 0)
@@ -5743,7 +5742,7 @@
 			)
 		)
 		(property "Value" "DHT11"
-			(at 187.96 76.1999 0)
+			(at 179.578 85.598 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -6626,7 +6625,6 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "a39649e6-a6a0-49c6-b26d-fcbfedf5f75a")
 		(property "Reference" "J7"
 			(at 224.79 73.6599 0)
@@ -6638,7 +6636,7 @@
 			)
 		)
 		(property "Value" "MQ-02"
-			(at 224.79 76.1999 0)
+			(at 215.646 87.122 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -6965,7 +6963,7 @@
 			)
 		)
 		(property "Value" "FC-28"
-			(at 207.01 76.1999 0)
+			(at 198.882 86.36 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7455,7 +7453,6 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "e388f09a-ce39-44b2-a054-5beaa305cedc")
 		(property "Reference" "J4"
 			(at 170.18 73.6599 0)
@@ -7467,7 +7464,7 @@
 			)
 		)
 		(property "Value" "DS18B20"
-			(at 170.18 76.1999 0)
+			(at 160.782 85.09 0)
 			(effects
 				(font
 					(size 1.27 1.27)

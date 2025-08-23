@@ -75,6 +75,7 @@ jobs:
           arduino-cli lib install "Adafruit Unified Sensor" --verbose
           arduino-cli lib install "OneWire" --verbose
           arduino-cli lib install "DallasTemperature" --verbose
+          arduino-cli lib install "PubSubClient" --verbose
           
           # Verify library installations
           arduino-cli lib list

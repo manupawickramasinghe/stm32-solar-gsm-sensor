@@ -1,5 +1,8 @@
 name: Build and Release
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -19,7 +22,7 @@ jobs:
     steps:
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -34,15 +37,15 @@ jobs:
     needs: create_release
     permissions:
       contents: write
-    if: always()
+    if: ${{ !cancelled() && (needs.create_release.result == 'success' || needs.create_release.result == 'skipped') }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: Cache Arduino CLI
-        uses: actions/cache@v3
+        uses: actions/cache@v6
         with:
           path: |
             ~/.arduino15
@@ -68,7 +71,9 @@ jobs:
           # Update indexes and install STM32 core
           arduino-cli core update-index --verbose
           arduino-cli core search stm32 --verbose
-          arduino-cli core install "STMicroelectronics:stm32" --verbose
+          # Pinned: core 3.x made arduino::HardwareSerial abstract, so the
+          # HardwareSerial(rx, tx) constructor used for the SIM800L no longer builds.
+          arduino-cli core install "STMicroelectronics:stm32@2.12.0" --verbose
           
           # Install required libraries
           arduino-cli lib install "DHT sensor library@1.4.6" --verbose
@@ -107,7 +112,7 @@ jobs:
 
       - name: Upload Release Assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -119,7 +124,7 @@ jobs:
             release-files/sms-stm32-bluepill.elf
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware
           path: release-files

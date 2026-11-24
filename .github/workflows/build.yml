@@ -71,7 +71,9 @@ jobs:
           # Update indexes and install STM32 core
           arduino-cli core update-index --verbose
           arduino-cli core search stm32 --verbose
-          arduino-cli core install "STMicroelectronics:stm32" --verbose
+          # Pinned: core 3.x made arduino::HardwareSerial abstract, so the
+          # HardwareSerial(rx, tx) constructor used for the SIM800L no longer builds.
+          arduino-cli core install "STMicroelectronics:stm32@2.12.0" --verbose
           
           # Install required libraries
           arduino-cli lib install "DHT sensor library@1.4.6" --verbose
